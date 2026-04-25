@@ -225,6 +225,19 @@ def run(controller, args):
         rospy.logerr('No /puppet/end_pose feedback in %.1f s', args.feedback_wait)
         return
 
+    lp = controller.left_pose.pose
+    rp = controller.right_pose.pose
+    lq = [lp.orientation.x, lp.orientation.y, lp.orientation.z, lp.orientation.w]
+    rq = [rp.orientation.x, rp.orientation.y, rp.orientation.z, rp.orientation.w]
+    l_rpy_raw = euler_from_quaternion(lq)
+    r_rpy_raw = euler_from_quaternion(rq)
+    print('Raw LEFT quat(xyzw):', ['%.6f' % v for v in lq], ' -> rpy:', ['%.6f' % v for v in l_rpy_raw])
+    print('Raw RIGHT quat(xyzw):', ['%.6f' % v for v in rq], ' -> rpy:', ['%.6f' % v for v in r_rpy_raw])
+    if controller.left_joint is not None and len(controller.left_joint.position) >= 6:
+        print('Raw LEFT joint[0:6]:', ['%.6f' % v for v in controller.left_joint.position[:6]])
+    if controller.right_joint is not None and len(controller.right_joint.position) >= 6:
+        print('Raw RIGHT joint[0:6]:', ['%.6f' % v for v in controller.right_joint.position[:6]])
+
     if controller.left_joint is not None and len(controller.left_joint.position) >= 6:
         controller.left_ik.init_data = np.array(controller.left_joint.position[:6], dtype=float)
         controller.left_ik.history_data = controller.left_ik.init_data.copy()
