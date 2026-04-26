@@ -18,8 +18,9 @@ cd aloha-devel
 推理
 bash act/inference.sh
 # keyboard run, able to check whether each motor is working or not
-python teleop/keyboard_control.py
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/joint_keyboard_control.py
 # eef publisher
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keybaord_control.py
 ## 推理时注意安全, 如果发现推理表现不正常, 请立即中断代码或者断开机械臂电源
 
 
@@ -35,3 +36,12 @@ python teleop/keyboard_control.py
 | 4 | 11 | 小臂 joint |
 | 5 | 12 | 腕部（以臂为轴旋转） |
 | 6 | 13 | 夹爪（0-0.1，关-开） |
+
+
+
+# TODO
+
+1. 设置3.10的环境 然后根据piperros的库实现双臂的pin command pos control
+2. 检查原本urdf 能不能用  不能就试试新的
+3 检查rpy pose的解算问题  
+4. 如果都不行 看看那个code head的开源方案

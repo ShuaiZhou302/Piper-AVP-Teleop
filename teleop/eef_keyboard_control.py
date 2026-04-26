@@ -2,6 +2,7 @@
 # -- coding: UTF-8
 
 import argparse
+import os
 import select
 import sys
 import termios
@@ -17,10 +18,24 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
 
+# 双臂键盘遥操作默认起点 (xyz m, rpy rad, gripper m) — 与一次实机 Initial pose+gripper 对齐
+DEFAULT_INITIAL_STATE14 = [
+    0.063297, 0.003124, 0.207408, 1.953564, 1.519798, 2.002905, 0.018500,
+    0.062753, -0.001768, 0.211541, 0.028170, 1.570796, 0.000000, 0.020000,
+]
+
 
 class PinocchioIKSolver:
     def __init__(self, urdf_path):
-        self.robot = pin.RobotWrapper.BuildFromURDF(urdf_path)
+        self.urdf_path = urdf_path
+        ap = os.path.abspath(urdf_path)
+        i = ap.find(os.sep + 'piper_description' + os.sep)
+        _pkg = [ap[:i]] if i >= 0 else []
+        # new urdf 可能引用 private 包里没有的 mesh（如 gripper_base.STL），补一条本仓库 piper_ros/src
+        _extra = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'piper_ros', 'src'))
+        if _extra not in _pkg and os.path.isdir(os.path.join(_extra, 'piper_description', 'meshes')):
+            _pkg = _pkg + [_extra]
+        self.robot = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs=_pkg)
         self.reduced_robot = self.robot.buildReducedRobot(
             list_of_joints_to_lock=["joint7", "joint8"],
             reference_configuration=np.array([0.0] * self.robot.model.nq),
@@ -45,6 +60,15 @@ class PinocchioIKSolver:
         self.default_q = np.zeros(self.model.nq)
         self.init_data = np.zeros(self.model.nq)
         self.history_data = np.zeros(self.model.nq)
+        self.geom_model = pin.buildGeomFromUrdf(
+            self.robot.model, urdf_path, pin.GeometryType.COLLISION, package_dirs=_pkg
+        )
+        ngeom = len(self.geom_model.geometryObjects)
+        for i in range(4, 10):
+            for j in range(0, 3):
+                if i < ngeom and j < ngeom and i != j:
+                    self.geom_model.addCollisionPair(pin.CollisionPair(i, j))
+        self.geometry_data = pin.GeometryData(self.geom_model)
 
         self.cmodel = cpin.Model(self.model)
         self.cdata = self.cmodel.createData()
@@ -85,13 +109,18 @@ class PinocchioIKSolver:
             },
         )
 
-    def solve(self, xyz, rpy):
-        q = quaternion_from_euler(rpy[0], rpy[1], rpy[2])
-        target = pin.SE3(pin.Quaternion(q[3], q[0], q[1], q[2]), np.array(xyz, dtype=float))
+    def check_self_collision(self, q, gripper=np.array([0.0, 0.0])):
+        q_full = np.concatenate([np.array(q, dtype=float), np.array(gripper, dtype=float)], axis=0)
+        pin.forwardKinematics(self.robot.model, self.robot.data, q_full)
+        pin.updateGeometryPlacements(self.robot.model, self.robot.data, self.geom_model, self.geometry_data)
+        return pin.computeCollisions(self.geom_model, self.geometry_data, False)
 
+    def ik_fun(self, target_pose, gripper=0.0, motorstate=None, motorV=None):
+        gripper_vec = np.array([gripper / 2.0, -gripper / 2.0])
+        if motorstate is not None:
+            self.init_data = np.array(motorstate, dtype=float).copy()
         self.opti.set_initial(self.var_q, self.init_data)
-        self.opti.set_value(self.param_tf, target.homogeneous)
-
+        self.opti.set_value(self.param_tf, target_pose)
         try:
             self.opti.solve_limited()
             sol_q = np.array(self.opti.value(self.var_q)).reshape(-1)
@@ -100,9 +129,29 @@ class PinocchioIKSolver:
             if max_diff > (30.0 / 180.0 * np.pi):
                 self.init_data = np.zeros(self.model.nq)
             self.history_data = sol_q.copy()
-            return sol_q[:6], True, "ok"
+            if motorV is not None:
+                v = np.array(motorV, dtype=float) * 0.0
+            else:
+                v = (sol_q - self.init_data) * 0.0
+            tau_ff = pin.rnea(
+                self.reduced_robot.model,
+                self.reduced_robot.data,
+                sol_q,
+                v,
+                np.zeros(self.reduced_robot.model.nv),
+            )
+            is_collision = self.check_self_collision(sol_q, gripper_vec)
+            return sol_q, tau_ff, (not is_collision)
         except Exception:
-            return None, False, "ipopt_failed_or_max_iter"
+            return None, None, False
+
+    def solve(self, xyz, rpy, gripper=0.0, motorstate=None):
+        q = quaternion_from_euler(rpy[0], rpy[1], rpy[2])
+        target = pin.SE3(pin.Quaternion(q[3], q[0], q[1], q[2]), np.array(xyz, dtype=float))
+        sol_q, _, get_result = self.ik_fun(target.homogeneous, gripper=gripper, motorstate=motorstate)
+        if get_result and sol_q is not None:
+            return sol_q[:6], True, "ok"
+        return None, False, "ik_failed_or_collision"
 
 
 class Controller:
@@ -197,7 +246,7 @@ def get_args():
     p.add_argument('--left_cmd_topic', type=str, default='/master/joint_left')
     p.add_argument('--right_cmd_topic', type=str, default='/master/joint_right')
 
-    default_urdf = '/home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/urdf/piper_description.urdf'
+    default_urdf = '/home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/urdf/piper_description_new.urdf'
     p.add_argument('--left_urdf', type=str, default=default_urdf)
     p.add_argument('--right_urdf', type=str, default=default_urdf)
 
@@ -245,7 +294,7 @@ def run(controller, args):
         controller.right_ik.init_data = np.array(controller.right_joint.position[:6], dtype=float)
         controller.right_ik.history_data = controller.right_ik.init_data.copy()
 
-    s = controller.initial_state14()
+    s = list(DEFAULT_INITIAL_STATE14)
     print('Initial LEFT pose+gripper:', ['%.6f' % v for v in s[:7]])
     print('Initial RIGHT pose+gripper:', ['%.6f' % v for v in s[7:14]])
     print('Dim map: left[0..6]=xyz rpy g, right[7..13]=xyz rpy g')
@@ -318,8 +367,14 @@ def run(controller, args):
                 print('\\nPublish gripper only. left_g=%.4f right_g=%.4f' % (s[6], s[13]))
                 continue
 
-            l6, lok, lmsg = controller.left_ik.solve(s[0:3], s[3:6])
-            r6, rok, rmsg = controller.right_ik.solve(s[7:10], s[10:13])
+            left_motor = None
+            right_motor = None
+            if controller.left_joint is not None and len(controller.left_joint.position) >= 6:
+                left_motor = controller.left_joint.position[:6]
+            if controller.right_joint is not None and len(controller.right_joint.position) >= 6:
+                right_motor = controller.right_joint.position[:6]
+            l6, lok, lmsg = controller.left_ik.solve(s[0:3], s[3:6], gripper=s[6], motorstate=left_motor)
+            r6, rok, rmsg = controller.right_ik.solve(s[7:10], s[10:13], gripper=s[13], motorstate=right_motor)
 
             print('\\nLEFT IK:', 'SUCCESS' if lok else 'FAILED', lmsg)
             print('RIGHT IK:', 'SUCCESS' if rok else 'FAILED', rmsg)
