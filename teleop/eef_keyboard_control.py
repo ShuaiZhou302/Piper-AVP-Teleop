@@ -18,13 +18,6 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
 
-# 双臂键盘遥操作默认起点 (xyz m, rpy rad, gripper m) — 与一次实机 Initial pose+gripper 对齐
-DEFAULT_INITIAL_STATE14 = [
-    0.063297, 0.003124, 0.207408, 1.953564, 1.519798, 2.002905, 0.018500,
-    0.062753, -0.001768, 0.211541, 0.028170, 1.570796, 0.000000, 0.020000,
-]
-
-
 class PinocchioIKSolver:
     def __init__(self, urdf_path):
         self.urdf_path = urdf_path
@@ -41,22 +34,26 @@ class PinocchioIKSolver:
             reference_configuration=np.array([0.0] * self.robot.model.nq),
         )
 
-        # Keep the same end-effector convention as official piper_pinocchio.py
-        q_identity = np.array([0.0, 0.0, 0.0, 1.0])  # x y z w
+        # 驱动报的 EE frame 与 URDF 的 joint6 frame 之间的静态偏移(已用 frame_visualize.py 验证):
+        #   位置:在 joint6 局部系下沿 -X 平移 0.05m
+        #   姿态:绕 joint6 局部 Y 轴旋转 -90°
+        ee_off_quat = quaternion_from_euler(0.0, -np.pi / 2.0, 0.0)  # x y z w (sxyz)
         self.reduced_robot.model.addFrame(
             pin.Frame(
                 "ee",
                 self.reduced_robot.model.getJointId("joint6"),
                 pin.SE3(
-                    pin.Quaternion(q_identity[3], q_identity[0], q_identity[1], q_identity[2]),
-                    np.array([0.0, 0.0, 0.0]),
+                    pin.Quaternion(ee_off_quat[3], ee_off_quat[0], ee_off_quat[1], ee_off_quat[2]),
+                    np.array([-0.05, 0.0, 0.0]),
                 ),
                 pin.FrameType.OP_FRAME,
             )
         )
 
         self.model = self.reduced_robot.model
-        self.data = self.reduced_robot.data
+        # addFrame 之后必须重建 data,否则 data.oMf 长度还是旧值,访问 ee_frame_id 越界
+        self.data = self.model.createData()
+        self.reduced_robot.data = self.data
         self.default_q = np.zeros(self.model.nq)
         self.init_data = np.zeros(self.model.nq)
         self.history_data = np.zeros(self.model.nq)
@@ -191,7 +188,12 @@ class Controller:
         deadline = rospy.Time.now() + rospy.Duration(timeout_sec)
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
-            if self.left_pose is not None and self.right_pose is not None:
+            poses_ready = self.left_pose is not None and self.right_pose is not None
+            joints_ready = (
+                self.left_joint is not None and len(self.left_joint.position) >= 6
+                and self.right_joint is not None and len(self.right_joint.position) >= 6
+            )
+            if poses_ready and joints_ready:
                 return True
             if rospy.Time.now() > deadline:
                 return False
@@ -247,6 +249,7 @@ def get_args():
     p.add_argument('--right_cmd_topic', type=str, default='/master/joint_right')
 
     default_urdf = '/home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/urdf/piper_description_new.urdf'
+    # default_urdf = '/home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/urdf/piper_description.urdf'
     p.add_argument('--left_urdf', type=str, default=default_urdf)
     p.add_argument('--right_urdf', type=str, default=default_urdf)
 
@@ -290,11 +293,38 @@ def run(controller, args):
     if controller.left_joint is not None and len(controller.left_joint.position) >= 6:
         controller.left_ik.init_data = np.array(controller.left_joint.position[:6], dtype=float)
         controller.left_ik.history_data = controller.left_ik.init_data.copy()
+        _q_l = np.array(controller.left_joint.position[:6], dtype=float)
+        pin.framesForwardKinematics(controller.left_ik.model, controller.left_ik.data, _q_l)
+        _T_l = controller.left_ik.data.oMf[controller.left_ik.ee_frame_id]
+        _ql = pin.Quaternion(_T_l.rotation)  # w,x,y,z accessors
+        _rpy_l = euler_from_quaternion([_ql.x, _ql.y, _ql.z, _ql.w])
+        print('FK   LEFT xyz:', ['%.6f' % v for v in _T_l.translation], ' -> rpy:', ['%.6f' % v for v in _rpy_l])
     if controller.right_joint is not None and len(controller.right_joint.position) >= 6:
         controller.right_ik.init_data = np.array(controller.right_joint.position[:6], dtype=float)
         controller.right_ik.history_data = controller.right_ik.init_data.copy()
+        _q_r = np.array(controller.right_joint.position[:6], dtype=float)
+        pin.framesForwardKinematics(controller.right_ik.model, controller.right_ik.data, _q_r)
+        _T_r = controller.right_ik.data.oMf[controller.right_ik.ee_frame_id]
+        _qr = pin.Quaternion(_T_r.rotation)
+        _rpy_r = euler_from_quaternion([_qr.x, _qr.y, _qr.z, _qr.w])
+        print('FK   RIGHT xyz:', ['%.6f' % v for v in _T_r.translation], ' -> rpy:', ['%.6f' % v for v in _rpy_r])
 
-    s = list(DEFAULT_INITIAL_STATE14)
+    # 用 FK 的输出作为初始 target —— FK 已经把 ee 偏移算进去了,
+    # 所以 s 里的 (xyz, rpy) 和 IK 内部的 ee frame 是同一个约定(自然 EE,而非驱动的 joint6)。
+    lg = controller.args.gripper_init
+    rg = controller.args.gripper_init
+    if controller.left_joint is not None and len(controller.left_joint.position) >= 7:
+        lg = controller.left_joint.position[6]
+    if controller.right_joint is not None and len(controller.right_joint.position) >= 7:
+        rg = controller.right_joint.position[6]
+    s = [
+        _T_l.translation[0], _T_l.translation[1], _T_l.translation[2],
+        _rpy_l[0], _rpy_l[1], _rpy_l[2],
+        lg,
+        _T_r.translation[0], _T_r.translation[1], _T_r.translation[2],
+        _rpy_r[0], _rpy_r[1], _rpy_r[2],
+        rg,
+    ]
     print('Initial LEFT pose+gripper:', ['%.6f' % v for v in s[:7]])
     print('Initial RIGHT pose+gripper:', ['%.6f' % v for v in s[7:14]])
     print('Dim map: left[0..6]=xyz rpy g, right[7..13]=xyz rpy g')

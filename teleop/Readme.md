@@ -20,7 +20,7 @@ bash act/inference.sh
 # keyboard run, able to check whether each motor is working or not
 python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/joint_keyboard_control.py
 # eef publisher
-python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keybaord_control.py
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keyboard_control.py
 ## 推理时注意安全, 如果发现推理表现不正常, 请立即中断代码或者断开机械臂电源
 
 
@@ -42,6 +42,12 @@ python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keybaord
 # TODO
 
 1. 设置3.10的环境 然后根据piperros的库实现双臂的pin command pos control
-2. 检查原本urdf 能不能用  不能就试试新的
-3 检查rpy pose的解算问题  
-4. 如果都不行 看看那个code head的开源方案
+2. 检查原本urdf 能不能用  不能就试试新的  新的可以用
+3  检查rpy pose的解算问题  
+    1. 看一下joint6到底是啥
+    2. rpy 到底是世界坐标系下的rpy 还是当前坐标系的rpy
+
+
+
+
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/frame_visualize.py --xyz 0.051315 -0.011833 0.172909 --rpy 2.927 1.299 3.011 --html /tmp/frame_right.html
