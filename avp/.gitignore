@@ -1,0 +1,3 @@
+# mkcert-issued TLS material — local only, LAN-IP-bound, regenerate per machine.
+cert.pem
+key.pem
