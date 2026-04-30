@@ -50,13 +50,15 @@ python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keyboard
 
 | 左臂 dim | 右臂 dim | 含义 | 单位 | step 默认值 |
 | --- | --- | --- | --- | --- |
-| 0  | 7  | x —— EE 在 base frame 下的 X 位置(前后) | m | 0.002 |
-| 1  | 8  | y —— EE 在 base frame 下的 Y 位置(左右) | m | 0.002 |
-| 2  | 9  | z —— EE 在 base frame 下的 Z 位置(上下) | m | 0.002 |
-| 3  | 10 | roll  —— 绕 base X 轴旋转(外旋,sxyz 第 1 步) | rad | 0.01 |
-| 4  | 11 | pitch —— 绕 base Y 轴旋转(外旋,sxyz 第 2 步) | rad | 0.01 |
-| 5  | 12 | yaw   —— 绕 base Z 轴旋转(外旋,sxyz 第 3 步) | rad | 0.01 |
+| 0  | 7  | x —— EE 在 base frame 下的 X 位置 &nbsp;&nbsp;**(+x 向前)** | m | 0.002 |
+| 1  | 8  | y —— EE 在 base frame 下的 Y 位置 &nbsp;&nbsp;**(+y 向左)** | m | 0.002 |
+| 2  | 9  | z —— EE 在 base frame 下的 Z 位置 &nbsp;&nbsp;**(+z 向上)** | m | 0.002 |
+| 3  | 10 | roll  —— 绕 base X 轴旋转(外旋,sxyz 第 1 步) &nbsp;&nbsp;**(+roll 向右倾)** | rad | 0.01 |
+| 4  | 11 | pitch —— 绕 base Y 轴旋转(外旋,sxyz 第 2 步) &nbsp;&nbsp;**(+pitch 低头/向下)** | rad | 0.01 |
+| 5  | 12 | yaw   —— 绕 base Z 轴旋转(外旋,sxyz 第 3 步) &nbsp;&nbsp;**(+yaw 向左转)** | rad | 0.01 |
 | 6  | 13 | 夹爪开合(0–0.1, 关–开) | m | 0.002 |
+
+> 上述正方向都是用 `eef_keyboard_control.py` 单轴点动 + 观察真机得到的实测结果。
 
 > rpy 是 ROS / 航空标准的 sxyz 约定 —— 等价说法是"绕固定 base 轴依次 X→Y→Z 旋转",或"绕本体当前轴依次 Z→Y→X 旋转(顺序反过来)"。pitch 接近 ±90° 会进入万向锁,届时 roll/yaw 数值会退化耦合。
 
@@ -124,6 +126,24 @@ xdg-open /tmp/frame_right_offset.html
 # --offset_xyz 0 0 0 → 偏移退化为只有旋转
 python ... --offset_xyz 0 0 0 --offset_rpy 0 -90 0 --offset_deg --html /tmp/gripper.html
 ```
+
+## URDF Mesh 配置(一次性)
+
+`piper_description_new.urdf` 引用了 `gripper_base.STL`,但 private 包 `Piper_ros_private-ros-noetic` 里**没有**这个文件。不补的话 Pinocchio 在 `BuildFromURDF` 时会报:
+
+```
+ValueError: Mesh package://piper_description/meshes/gripper_base.STL could not be found.
+```
+
+这个 mesh 在 agilexrobotics 上游 `piper_ros` 仓库里,clone 一份把那一个 STL 拷到 private 包就行:
+
+```bash
+git clone https://github.com/agilexrobotics/piper_ros.git
+cp piper_ros/src/piper_description/meshes/gripper_base.STL \
+   /home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/meshes/
+```
+
+只需要 `gripper_base.STL` 这一个文件,其它 mesh(`base_link.STL`、`link1-8.STL`)private 包里都有。拷完之后如果 `piper_ros/` 没别的用途,可以直接删掉。
 
 ## 运行环境
 

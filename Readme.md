@@ -50,13 +50,15 @@ End-effector pose = translation (xyz, m) + orientation (rpy, rad, sxyz / extrins
 
 | Left dim | Right dim | Description | Unit | Default step |
 | --- | --- | --- | --- | --- |
-| 0  | 7  | x — EE X position in base frame (forward / backward) | m | 0.002 |
-| 1  | 8  | y — EE Y position in base frame (left / right)       | m | 0.002 |
-| 2  | 9  | z — EE Z position in base frame (up / down)          | m | 0.002 |
-| 3  | 10 | roll  — rotation about base X (extrinsic, sxyz step 1) | rad | 0.01 |
-| 4  | 11 | pitch — rotation about base Y (extrinsic, sxyz step 2) | rad | 0.01 |
-| 5  | 12 | yaw   — rotation about base Z (extrinsic, sxyz step 3) | rad | 0.01 |
+| 0  | 7  | x — EE X in base frame &nbsp;&nbsp;**(+x forward)** | m | 0.002 |
+| 1  | 8  | y — EE Y in base frame &nbsp;&nbsp;**(+y left)**    | m | 0.002 |
+| 2  | 9  | z — EE Z in base frame &nbsp;&nbsp;**(+z up)**      | m | 0.002 |
+| 3  | 10 | roll  — rotation about base X (extrinsic, sxyz step 1) &nbsp;&nbsp;**(+roll tilts right)** | rad | 0.01 |
+| 4  | 11 | pitch — rotation about base Y (extrinsic, sxyz step 2) &nbsp;&nbsp;**(+pitch tilts down / nods down)** | rad | 0.01 |
+| 5  | 12 | yaw   — rotation about base Z (extrinsic, sxyz step 3) &nbsp;&nbsp;**(+yaw turns left)** | rad | 0.01 |
 | 6  | 13 | gripper opening (0–0.1, closed–open) | m | 0.002 |
+
+> Sign conventions above are verified empirically by jogging each axis in `eef_keyboard_control.py` and observing the real arm.
 
 > rpy follows the ROS / aerospace `sxyz` convention. Equivalent readings: "rotate about the fixed base axes in order X→Y→Z" or, equivalently, "rotate about the current body axes in order Z→Y→X (reversed)". When pitch approaches ±90° you enter gimbal lock and the roll / yaw values become coupled.
 
@@ -124,6 +126,24 @@ Compare `main*(R-then-T)` against the real robot to check whether it matches the
 # --offset_xyz 0 0 0 → offset reduces to rotation only
 python ... --offset_xyz 0 0 0 --offset_rpy 0 -90 0 --offset_deg --html /tmp/gripper.html
 ```
+
+## URDF Mesh Setup (one-time)
+
+`piper_description_new.urdf` references `gripper_base.STL`, which the private `Piper_ros_private-ros-noetic` package does **not** ship. Pinocchio's `BuildFromURDF` will fail with
+
+```
+ValueError: Mesh package://piper_description/meshes/gripper_base.STL could not be found.
+```
+
+until you drop that mesh in. The file lives in agilexrobotics' upstream `piper_ros`:
+
+```bash
+git clone https://github.com/agilexrobotics/piper_ros.git
+cp piper_ros/src/piper_description/meshes/gripper_base.STL \
+   /home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/meshes/
+```
+
+Only `gripper_base.STL` is needed — all other meshes (`base_link.STL`, `link1-8.STL`) are already in the private package. After copying, you can delete the cloned `piper_ros/` directory if you don't need it for anything else.
 
 ## Runtime Environment
 

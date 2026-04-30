@@ -115,6 +115,7 @@ After flipping the flags, **fully quit and relaunch Safari**.
 PC: run the minimal test script (provided in the next section):
 
 ```bash
+conda activate aloha     # or whichever env has vuer installed
 cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/avp
 python avp_min_test.py
 ```
@@ -207,3 +208,30 @@ head position as the origin for subsequent deltas. See
   push a camera feed into the Vuer scene background — see the `ImageBackground`
   usage in [tele_vision.py:88-171](../egox/data_collect/tele_vision.py#L88-L171)
   — but you won't see your actual room.
+
+---
+
+## 9. Empirical AVP world frame
+
+Verified on this machine by walking and tilting the head while watching the
+`avp_min_test.py` HUD. Reference is the operator's body, looking forward in the
+neutral pose used to enter immersive.
+
+### Position (right-handed, AVP world frame)
+- **+x**: to the operator's right
+- **+y**: up (vertical)
+- **+z**: backward (towards the operator's back)
+
+This matches the WebXR convention: `-z` is forward, `+y` is up, right-handed.
+
+### Orientation (yaw / pitch / roll from `mat_to_yaw_pitch_roll_yup`, YXZ intrinsic)
+- **+yaw**: head turns to the **left**
+- **+pitch**: head tilts **up** (chin up)
+- **+roll**: head tilts to the **left** (right tilt is negative)
+
+The same conventions apply to `left_hand` / `right_hand` orientations, which
+are reported in the same AVP world frame.
+
+To use these poses for a robot whose world is z-up / x-forward (IsaacGym, most
+arm controllers), apply the axis remap from
+[egox_data_collect.py:1454-1472](../egox/data_collect/egox_data_collect.py#L1454-L1472).

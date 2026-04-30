@@ -44,7 +44,8 @@ class PinocchioIKSolver:
                 self.reduced_robot.model.getJointId("joint6"),
                 pin.SE3(
                     pin.Quaternion(ee_off_quat[3], ee_off_quat[0], ee_off_quat[1], ee_off_quat[2]),
-                    np.array([-0.05, 0.0, 0.0]),
+                    np.array([0.0, 0.0, 0.0]), # the xyz gap of the gripper
+                    # np.array([-0.05, 0.0, 0.0]), # the xyz gap of the camera
                 ),
                 pin.FrameType.OP_FRAME,
             )
