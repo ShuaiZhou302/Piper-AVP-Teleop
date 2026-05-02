@@ -33,18 +33,21 @@
 
 ---
 
-## Step A — 在 `avp_min_test.py` 里加手势状态机
+## Step A — 新建 `avp/avp_gesture_test.py`(独立诊断脚本)
+
+`avp_min_test.py` 保持原样作为"连接性最小诊断",手势状态机另开新文件。
+`GestureStateMachine` 类放进去,Step B 时直接 `from avp_gesture_test import GestureStateMachine` 复用。
 
 **目标**:把手势检测调到可靠后再接机械臂,免得 Step B 调试时同时面对手势 + IK 两个变量。
 
-- [ ] 读 `vr.left_landmarks`、`vr.right_landmarks`
-- [ ] 计算 `‖[4] - [14]‖`(拇指 ↔ 中指)左右两个值
-- [ ] 状态枚举:`IDLE` / `LOCKED` / `ENGAGED`
-- [ ] 状态转移:
-  - `IDLE → LOCKED`:左手距离 < 0.03 m(rising edge)
+- [x] 读 `vr.left_landmarks`、`vr.right_landmarks`
+- [x] 计算 `‖[4] - [14]‖`(拇指 ↔ 中指)左右两个值
+- [x] 状态枚举:`IDLE` / `LOCKED` / `ENGAGED`
+- [x] 状态转移:
+  - `IDLE → LOCKED`:左手距离 < 0.03 m(rising edge,启动时默认 _was_closed=True 防误触)
   - `LOCKED → ENGAGED`:右手距离 < 0.03 m(持续触发)
   - `ENGAGED → LOCKED`:右手距离 > 0.04 m(松开,留点 hysteresis 防抖)
-- [ ] HUD 上把当前 STATE 字符串渲染出来
+- [x] HUD 上把当前 STATE 字符串渲染出来(大字 + 提示语)
 - [ ] 戴头显验证 3 个状态切换都稳
 
 ---
