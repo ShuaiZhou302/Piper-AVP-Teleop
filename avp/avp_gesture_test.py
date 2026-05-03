@@ -5,10 +5,10 @@ Gesture state machine test (Step A of AVP -> Piper teleop plan).
 Verifies pinch detection and IDLE / LOCKED / ENGAGED transitions in isolation,
 before wiring the state machine into the actual arm controller.
 
-Gestures:
-  Left  thumb+middle pinch (rising edge) : IDLE   -> LOCKED
-  Right thumb+middle pinch (held)        : LOCKED -> ENGAGED
-  Right thumb+middle pinch (released)    : ENGAGED -> LOCKED  (hysteresis)
+Gestures (all rising-edge with Schmitt-trigger hysteresis):
+  Left  thumb+middle pinch : IDLE    -> LOCKED
+  Right thumb+middle pinch : LOCKED  -> ENGAGED   (1st pinch = start)
+  Right thumb+middle pinch : ENGAGED -> LOCKED    (2nd pinch = pause/end)
 
 Run:
   conda activate aloha
@@ -53,32 +53,48 @@ class State(Enum):
 
 
 class GestureStateMachine:
-    """Two-stage state machine driven by left/right thumb-middle pinch."""
+    """Toggle-style state machine driven by left/right thumb-middle pinch.
+
+    IDLE     --[L pinch rising edge]--> LOCKED
+    LOCKED   --[R pinch rising edge]--> ENGAGED
+    ENGAGED  --[R pinch rising edge]--> LOCKED  (toggle, NOT deadman)
+
+    Both pinches use Schmitt-trigger hysteresis (PINCH_CLOSE / PINCH_OPEN) so
+    a wobbling distance near the threshold doesn't cause spurious transitions.
+    Initial _was_closed = True forces user to open then close on first use,
+    avoiding accidental triggers if the program starts mid-pinch.
+    """
 
     def __init__(self):
         self.state = State.IDLE
-        # Track left pinch closed-state across frames for rising-edge detection.
-        # Initialised True so that if the user starts the program already
-        # pinching, we don't immediately fire IDLE -> LOCKED. They have to
-        # open then close again.
         self._left_was_closed = True
+        self._right_was_closed = True
+
+    @staticmethod
+    def _phys_closed(was_closed: bool, dist: float) -> bool:
+        # Hysteresis: stay in current state until we cross the OTHER threshold.
+        if was_closed:
+            return dist < PINCH_OPEN
+        return dist < PINCH_CLOSE
 
     def update(self, left_pinch_dist: float, right_pinch_dist: float) -> State:
-        left_closed = left_pinch_dist < PINCH_CLOSE
-        right_closed = right_pinch_dist < PINCH_CLOSE
-        right_open = right_pinch_dist > PINCH_OPEN
+        left_closed = self._phys_closed(self._left_was_closed, left_pinch_dist)
+        right_closed = self._phys_closed(self._right_was_closed, right_pinch_dist)
+        left_rising = left_closed and not self._left_was_closed
+        right_rising = right_closed and not self._right_was_closed
 
         if self.state is State.IDLE:
-            if left_closed and not self._left_was_closed:
+            if left_rising:
                 self.state = State.LOCKED
         elif self.state is State.LOCKED:
-            if right_closed:
+            if right_rising:
                 self.state = State.ENGAGED
         elif self.state is State.ENGAGED:
-            if right_open:
+            if right_rising:
                 self.state = State.LOCKED
 
         self._left_was_closed = left_closed
+        self._right_was_closed = right_closed
         return self.state
 
 
@@ -92,8 +108,8 @@ STATE_COLOR = {
 
 STATE_HINT = {
     State.IDLE:    ["Pinch L thumb+middle", "to LOCK"],
-    State.LOCKED:  ["HOLD R thumb+middle", "to ENGAGE"],
-    State.ENGAGED: ["HOLD to teleop", "release to pause"],
+    State.LOCKED:  ["Pinch R thumb+middle", "to ENGAGE"],
+    State.ENGAGED: ["Pinch R thumb+middle", "again to PAUSE"],
 }
 
 

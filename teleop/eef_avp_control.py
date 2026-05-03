@@ -11,9 +11,17 @@ Run:
   python eef_avp_control.py
 """
 
-# Initial right-arm EE pose (Piper base frame) used as the AVP-teleop reset anchor.
-# Format: (x, y, z, roll, pitch, yaw, gripper) — meters / radians / meters.
-INITIAL_ARM_POSE = (0.065, -0.00, 0.38, 0.0, 0.0, 0.0, 0.1)
+# Initial right-arm EE pose (Piper base frame) — DEPRECATED, kept for reference.
+# Going through IK from a random current config picks ugly multi-solution branches
+# (shoulder out, elbow flipped) so we now anchor by joint values directly.
+# INITIAL_ARM_POSE = (0.065, -0.00, 0.38, 0.0, 0.0, 0.0, 0.1)
+
+# Initial right-arm joint configuration (joint0..joint5, radians).
+# Captured from /puppet/joint_right with the arm manually posed in teach mode.
+# Boot ramp drives joint angles directly to these values; the corresponding
+# EE pose is derived from FK at runtime and used as the teleop reset anchor.
+INITIAL_ARM_JOINTS = (-0.0982, 0.4652, -0.7781, -0.0486, 0.4096, 0.0692)
+INITIAL_GRIPPER = 0.1
 
 # Right-arm-only test. Left arm is held by echoing its current joint state.
 
@@ -109,6 +117,17 @@ class AvpEefController:
         self.frame_idx = 0
         self.last_print = 0.0
 
+        # Last commanded joint configs. Once boot ramp finishes we keep
+        # publishing these every frame; we DO NOT echo /puppet feedback,
+        # otherwise feedback lag drives the motor backwards (fight-back loop).
+        self.right_target_q = None
+        self.left_held_q = None
+
+        # Initial EE pose anchor for teleop delta tracking, derived from FK
+        # on INITIAL_ARM_JOINTS during boot ramp.
+        self.initial_arm_xyz = None
+        self.initial_arm_R = None
+
         # HUD fonts
         try:
             self.font_big = ImageFont.truetype(
@@ -174,13 +193,9 @@ class AvpEefController:
 
     # ------------- Boot ramp -------------
     def boot_ramp_to_initial(self, duration=3.0, hz=30.0):
-        seed = list(self.right_joint.position[:6]) if self.right_joint else None
-        sol, ok, msg = self.right_ik.solve(
-            INITIAL_ARM_POSE[:3], INITIAL_ARM_POSE[3:6], gripper=0.1, motorstate=seed
-        )
-        if not ok:
-            raise RuntimeError(f"IK failed for INITIAL_ARM_POSE: {msg}")
-        target_q = np.asarray(sol, dtype=float)
+        # Joint-space anchor: drive directly to INITIAL_ARM_JOINTS (no IK).
+        # Avoids IK multi-solution drift when current pose is far from anchor.
+        target_q = np.asarray(INITIAL_ARM_JOINTS, dtype=float)
         current_q = np.asarray(self.right_joint.position[:6], dtype=float)
         steps = max(1, int(duration * hz))
         rate = rospy.Rate(hz)
@@ -191,31 +206,27 @@ class AvpEefController:
             alpha = (i + 1) / steps
             interp = (1.0 - alpha) * current_q + alpha * target_q
             left6 = list(self.left_joint.position[:6])
-            self.publish_joints(left6, list(interp), 0.1, 0.1)
+            self.publish_joints(left6, list(interp), INITIAL_GRIPPER, INITIAL_GRIPPER)
             self._draw_hud_text(["BOOTING", f"alpha = {alpha:.2f}"], colors=[(255, 200, 0), (200, 200, 200)])
             rate.sleep()
+        # Lock in the held targets — main loop will keep publishing these.
+        self.right_target_q = target_q.tolist()
+        self.left_held_q = list(self.left_joint.position[:6])
         print("[teleop] Boot ramp done.")
 
-        # Verify the IK solution actually corresponds to INITIAL_ARM_POSE.
+        # Compute the EE pose at INITIAL_ARM_JOINTS via FK; store as the
+        # teleop-tracking anchor (used by compute_target_pose).
         fk_xyz, fk_rpy = self._fk_right(target_q)
-        tgt_xyz = np.array(INITIAL_ARM_POSE[:3])
-        tgt_rpy = np.array(INITIAL_ARM_POSE[3:6])
+        self.initial_arm_xyz = fk_xyz
+        self.initial_arm_R = euler_matrix(*fk_rpy)[:3, :3]
         print(
-            f"[teleop] FK on target_q : xyz={fk_xyz.round(4).tolist()}  "
+            f"[teleop] FK at INITIAL_ARM_JOINTS: xyz={fk_xyz.round(4).tolist()}  "
             f"rpy(deg)={np.rad2deg(fk_rpy).round(2).tolist()}"
-        )
-        print(
-            f"[teleop] INITIAL_ARM_POSE: xyz={tgt_xyz.round(4).tolist()}  "
-            f"rpy(deg)={np.rad2deg(tgt_rpy).round(2).tolist()}"
-        )
-        print(
-            f"[teleop] residual        : dpos={(fk_xyz - tgt_xyz).round(4).tolist()}  "
-            f"drpy(deg)={np.rad2deg(fk_rpy - tgt_rpy).round(2).tolist()}"
         )
 
     # ------------- Pose math -------------
     def compute_target_pose(self, head_now):
-        """World-frame composition: target = R_remap(delta_avp) * INITIAL_ARM_POSE."""
+        """World-frame composition: target = R_remap(delta_avp) * initial_arm_pose."""
         head_lock = self.head_pose_at_lock
         delta_pos_avp = head_now[:3, 3] - head_lock[:3, 3]
         delta_R_avp = head_now[:3, :3] @ head_lock[:3, :3].T
@@ -223,11 +234,8 @@ class AvpEefController:
         delta_pos_piper = R_AVP_TO_PIPER @ delta_pos_avp * self.scale
         delta_R_piper = R_AVP_TO_PIPER @ delta_R_avp @ R_AVP_TO_PIPER.T
 
-        initial_xyz = np.array(INITIAL_ARM_POSE[:3], dtype=float)
-        initial_R = euler_matrix(*INITIAL_ARM_POSE[3:6])[:3, :3]
-
-        target_pos = initial_xyz + delta_pos_piper
-        target_R = delta_R_piper @ initial_R
+        target_pos = self.initial_arm_xyz + delta_pos_piper
+        target_R = delta_R_piper @ self.initial_arm_R
         target_rpy = np.array(euler_from_matrix(target_R), dtype=float)
         return target_pos, target_rpy
 
@@ -320,9 +328,6 @@ class AvpEefController:
                 hp = self.head_pose_at_lock[:3, 3]
                 print(f"[teleop] LOCKED. head xyz={hp.round(3)}")
 
-            # Build joint commands
-            left6_hold = list(self.left_joint.position[:6]) if self.left_joint else [0.0] * 6
-            right6_hold = list(self.right_joint.position[:6]) if self.right_joint else [0.0] * 6
             target_pos = None
             target_rpy = None
 
@@ -331,19 +336,18 @@ class AvpEefController:
                 target_pos, target_rpy = self.compute_target_pose(head_now)
                 seed = list(self.right_joint.position[:6]) if self.right_joint else None
                 sol, ok, ik_msg_now = self.right_ik.solve(
-                    target_pos, target_rpy, gripper=0.1, motorstate=seed
+                    target_pos, target_rpy, gripper=INITIAL_GRIPPER, motorstate=seed
                 )
                 if ok:
-                    right6_to_send = sol
+                    self.right_target_q = list(sol)   # update only on success
                     ik_msg = ""
                 else:
-                    right6_to_send = right6_hold
                     ik_msg = f"IK fail: {ik_msg_now}"
             else:
-                right6_to_send = right6_hold
                 ik_msg = ""
 
-            self.publish_joints(left6_hold, right6_to_send, 0.1, 0.1)
+            # Persistent hold: keep publishing the latest committed joint targets.
+            self.publish_joints(self.left_held_q, self.right_target_q, INITIAL_GRIPPER, INITIAL_GRIPPER)
             self.update_hud(state, target_pos, target_rpy, ik_msg)
 
             now = time.monotonic()
@@ -369,8 +373,9 @@ class AvpEefController:
         print("AVP head -> Piper right EE teleop")
         print("On AVP Safari open:")
         print("    https://10.7.132.66:8012?ws=wss://10.7.132.66:8012")
-        print(f"INITIAL_ARM_POSE = {INITIAL_ARM_POSE}")
-        print(f"scale = {self.scale}")
+        print(f"INITIAL_ARM_JOINTS = {INITIAL_ARM_JOINTS}")
+        print(f"INITIAL_GRIPPER    = {INITIAL_GRIPPER}")
+        print(f"scale              = {self.scale}")
         print("=" * 60)
         print("[teleop] Waiting for joint feedback (10s timeout)...")
         if not self.wait_feedback(10.0):
