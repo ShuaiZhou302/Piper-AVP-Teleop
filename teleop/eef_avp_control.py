@@ -31,9 +31,8 @@ import numpy as np
 # libstdc++ is already in-process and casadi import fails.
 HERE = os.path.dirname(os.path.abspath(__file__))
 AVP_DIR = os.path.normpath(os.path.join(HERE, "..", "avp"))
-EGOX_DIR = os.path.normpath(os.path.join(HERE, "..", "egox", "data_collect"))
 sys.path.insert(0, AVP_DIR)
-sys.path.insert(0, EGOX_DIR)
+sys.path.insert(0, HERE)
 
 from eef_keyboard_control import PinocchioIKSolver  # noqa: E402  (loads casadi)
 import pinocchio as pin  # noqa: E402  (already in-process via the line above)

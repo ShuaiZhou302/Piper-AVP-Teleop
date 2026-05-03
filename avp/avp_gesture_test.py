@@ -29,7 +29,7 @@ from multiprocessing import shared_memory
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "egox", "data_collect")))
+sys.path.insert(0, HERE)
 from tele_vision import OpenTeleVision  # noqa: E402
 
 CERT = os.path.join(HERE, "cert.pem")

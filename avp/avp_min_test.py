@@ -11,7 +11,7 @@ Then on AVP, open Safari and go to:
   https://<PC_IP>:8012?ws=wss://<PC_IP>:8012
 Tap "Enter VR".  Move your head; this script prints head_matrix.
 
-Reuses egox/data_collect/tele_vision.py (no duplication of Vuer plumbing).
+Uses the local tele_vision.py (Vuer/WebXR wrapper) sitting next to this file.
 """
 import os
 import sys
@@ -21,8 +21,7 @@ from multiprocessing import shared_memory
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TELE_VISION_DIR = os.path.normpath(os.path.join(HERE, "..", "egox", "data_collect"))
-sys.path.insert(0, TELE_VISION_DIR)
+sys.path.insert(0, HERE)
 
 from tele_vision import OpenTeleVision  # noqa: E402
 
