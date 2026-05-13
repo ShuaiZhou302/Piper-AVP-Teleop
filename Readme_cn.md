@@ -24,7 +24,7 @@ roslaunch astra_camera multi_camera.launch
 
 ```bash
 # 4. 控制脚本(选一个)
-cd aloha-devel
+cd /home/agilex/cobot_magic/aloha-devel
 bash act/inference.sh                                                                       # 推理
 python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/joint_keyboard_control.py  # 关节键盘控制
 python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keyboard_control.py    # 末端键盘控制
