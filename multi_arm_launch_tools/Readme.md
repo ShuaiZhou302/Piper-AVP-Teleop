@@ -33,3 +33,12 @@ roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch
 conda activate aloha
 roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/multi_camera_shuai.launch
 ```
+
+
+# 4. 机械臂单臂 eef pose track 测试
+
+```bash
+python3 teleop/eef_keyboard_control_singlearm.py             # 启动时交互式问选哪个臂
+python3 teleop/eef_keyboard_control_singlearm.py --arm m     # 直接指定 mid
+python3 teleop/eef_keyboard_control_singlearm.py --arm left  # 直接指定 left
+```
