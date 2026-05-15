@@ -42,3 +42,12 @@ python3 teleop/eef_keyboard_control_singlearm.py             # 启动时交互�
 python3 teleop/eef_keyboard_control_singlearm.py --arm m     # 直接指定 mid
 python3 teleop/eef_keyboard_control_singlearm.py --arm left  # 直接指定 left
 ```
+
+# 5. 机械臂单臂 joint pose track 测试
+
+```bash
+python3 teleop/joint_keyboard_control_singlearm.py             # 交互式问选哪个臂
+python3 teleop/joint_keyboard_control_singlearm.py --arm m     # mid
+python3 teleop/joint_keyboard_control_singlearm.py --arm l     # left
+python3 teleop/joint_keyboard_control_singlearm.py --arm r     # right
+```
