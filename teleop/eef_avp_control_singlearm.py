@@ -1,29 +1,24 @@
 #!/usr/bin/env python3
 """
-Step B: AVP head pose -> Piper right-arm EE teleop.
+Step B: AVP head pose -> Piper single-arm EE teleop.
 
 Single-process: Vuer subprocess + main thread (rospy + IK + publish + HUD).
-Right arm follows the operator's head; left arm holds, gripper fixed at 0.1.
+The selected arm (default: mid) follows the operator's head; gripper fixed.
 
 Run:
   conda activate aloha
   cd .../Piper-AVP-Teleop/teleop
-  python eef_avp_control.py
+  python eef_avp_control.py             # interactive arm prompt
+  python eef_avp_control.py --arm m     # or m / mid / l / left / r / right
 """
 
-# Initial right-arm EE pose (Piper base frame) — DEPRECATED, kept for reference.
-# Going through IK from a random current config picks ugly multi-solution branches
-# (shoulder out, elbow flipped) so we now anchor by joint values directly.
-# INITIAL_ARM_POSE = (0.065, -0.00, 0.38, 0.0, 0.0, 0.0, 0.1)
-
-# Initial right-arm joint configuration (joint0..joint5, radians).
-# Captured from /puppet/joint_right with the arm manually posed in teach mode.
+# Initial arm joint configuration (joint0..joint5, radians).
+# Captured from /puppet/joint_<arm> with the arm manually posed in teach mode.
 # Boot ramp drives joint angles directly to these values; the corresponding
 # EE pose is derived from FK at runtime and used as the teleop reset anchor.
+# Same Piper hardware on all three arms -> same "ready" joint config works.
 INITIAL_ARM_JOINTS = (-0.0982, 0.4652, -0.7781, -0.0486, 0.4096, 0.0692)
 INITIAL_GRIPPER = 0.1
-
-# Right-arm-only test. Left arm is held by echoing its current joint state.
 
 import argparse
 import os
@@ -56,6 +51,33 @@ from std_msgs.msg import Header  # noqa: E402
 from tf.transformations import euler_matrix, euler_from_matrix  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
+
+# Arm name normalization, matches eef_keyboard_control_singlearm.py.
+ARM_CHOICES = {
+    "l": "left",  "left":  "left",
+    "m": "mid",   "mid":   "mid",
+    "r": "right", "right": "right",
+}
+# Per-arm camera short name. mid uses the existing front camera /camera_f
+# (the head-mounted view, kept from the dual-arm setup).
+ARM_CAM_SHORT = {"left": "l", "mid": "f", "right": "r"}
+
+
+def resolve_arm(arm_arg):
+    if arm_arg is None:
+        while True:
+            x = input("Select arm (l=left / m=mid / r=right): ").strip().lower()
+            if x in ARM_CHOICES:
+                return ARM_CHOICES[x]
+            print("Please input l / m / r (or left / mid / right)")
+    key = arm_arg.strip().lower()
+    if key not in ARM_CHOICES:
+        raise SystemExit(
+            "Invalid --arm value: %s. Expected one of l/m/r/left/mid/right" % arm_arg
+        )
+    return ARM_CHOICES[key]
+
+
 # AVP world (right / up / back) -> Piper world (forward / left / up).
 R_AVP_TO_PIPER = np.array([
     [ 0,  0, -1],
@@ -86,6 +108,7 @@ def _make_shm():
 class AvpEefController:
     def __init__(self, args):
         self.args = args
+        self.arm = args.arm
         self.scale = args.scale
 
         # Vuer
@@ -97,19 +120,16 @@ class AvpEefController:
 
         # ROS
         rospy.init_node("eef_avp_teleop", anonymous=True)
-        self.left_joint = None
-        self.right_joint = None
+        self.joint = None
         self.latest_camera_frame = None  # numpy uint8 (H, W, 3) RGB
-        rospy.Subscriber(args.left_joint_topic, JointState, self._left_joint_cb, queue_size=50)
-        rospy.Subscriber(args.right_joint_topic, JointState, self._right_joint_cb, queue_size=50)
+        rospy.Subscriber(args.joint_topic, JointState, self._joint_cb, queue_size=50)
         rospy.Subscriber(
-            args.right_camera_topic, ImageMsg, self._right_camera_cb, queue_size=1, buff_size=2 ** 24
+            args.camera_topic, ImageMsg, self._camera_cb, queue_size=1, buff_size=2 ** 24
         )
-        self.left_pub = rospy.Publisher(args.left_cmd_topic, JointState, queue_size=10)
-        self.right_pub = rospy.Publisher(args.right_cmd_topic, JointState, queue_size=10)
+        self.pub = rospy.Publisher(args.cmd_topic, JointState, queue_size=10)
 
-        # IK (right arm only; left held)
-        self.right_ik = PinocchioIKSolver(args.right_urdf)
+        # IK
+        self.ik = PinocchioIKSolver(args.urdf)
 
         # State machine
         self.fsm = GestureStateMachine()
@@ -117,11 +137,10 @@ class AvpEefController:
         self.frame_idx = 0
         self.last_print = 0.0
 
-        # Last commanded joint configs. Once boot ramp finishes we keep
-        # publishing these every frame; we DO NOT echo /puppet feedback,
-        # otherwise feedback lag drives the motor backwards (fight-back loop).
-        self.right_target_q = None
-        self.left_held_q = None
+        # Last commanded joint config. Once boot ramp finishes we keep publishing
+        # this every frame; we DO NOT echo /puppet feedback, otherwise feedback
+        # lag drives the motor backwards (fight-back loop).
+        self.target_q = None
 
         # Initial EE pose anchor for teleop delta tracking, derived from FK
         # on INITIAL_ARM_JOINTS during boot ramp.
@@ -141,10 +160,10 @@ class AvpEefController:
             self.font = ImageFont.load_default()
 
     # ------------- ROS callbacks -------------
-    def _left_joint_cb(self, msg):  self.left_joint = msg
-    def _right_joint_cb(self, msg): self.right_joint = msg
+    def _joint_cb(self, msg):
+        self.joint = msg
 
-    def _right_camera_cb(self, msg):
+    def _camera_cb(self, msg):
         if msg.encoding == "rgb8":
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
         elif msg.encoding == "bgr8":
@@ -162,31 +181,27 @@ class AvpEefController:
         deadline = rospy.Time.now() + rospy.Duration(timeout_sec)
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
-            if (
-                self.left_joint is not None and len(self.left_joint.position) >= 6
-                and self.right_joint is not None and len(self.right_joint.position) >= 6
-            ):
+            if self.joint is not None and len(self.joint.position) >= 6:
                 return True
             if rospy.Time.now() > deadline:
                 return False
             rate.sleep()
         return False
 
-    def publish_joints(self, left6, right6, left_g, right_g):
+    def publish_joints(self, six, gripper):
         names = ["joint0", "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
-        m_left = JointState(); m_left.header = Header(stamp=rospy.Time.now())
-        m_left.name = names; m_left.position = list(left6) + [left_g]
-        m_right = JointState(); m_right.header = Header(stamp=rospy.Time.now())
-        m_right.name = names; m_right.position = list(right6) + [right_g]
-        self.left_pub.publish(m_left)
-        self.right_pub.publish(m_right)
+        m = JointState()
+        m.header = Header(stamp=rospy.Time.now())
+        m.name = names
+        m.position = list(six) + [gripper]
+        self.pub.publish(m)
 
     # ------------- FK helper (for verification / debug) -------------
-    def _fk_right(self, q6):
+    def _fk(self, q6):
         """Forward-kinematics on the IK reduced model. Returns (xyz, rpy) of EE."""
         q = np.asarray(q6, dtype=float).flatten()
-        pin.framesForwardKinematics(self.right_ik.model, self.right_ik.data, q)
-        se3 = self.right_ik.data.oMf[self.right_ik.ee_frame_id]
+        pin.framesForwardKinematics(self.ik.model, self.ik.data, q)
+        se3 = self.ik.data.oMf[self.ik.ee_frame_id]
         xyz = np.asarray(se3.translation, dtype=float).flatten()
         rpy = np.array(euler_from_matrix(se3.rotation), dtype=float)
         return xyz, rpy
@@ -196,7 +211,7 @@ class AvpEefController:
         # Joint-space anchor: drive directly to INITIAL_ARM_JOINTS (no IK).
         # Avoids IK multi-solution drift when current pose is far from anchor.
         target_q = np.asarray(INITIAL_ARM_JOINTS, dtype=float)
-        current_q = np.asarray(self.right_joint.position[:6], dtype=float)
+        current_q = np.asarray(self.joint.position[:6], dtype=float)
         steps = max(1, int(duration * hz))
         rate = rospy.Rate(hz)
         print(f"[teleop] Boot ramp ({duration}s): {current_q.round(3)} -> {target_q.round(3)}")
@@ -205,18 +220,15 @@ class AvpEefController:
                 return
             alpha = (i + 1) / steps
             interp = (1.0 - alpha) * current_q + alpha * target_q
-            left6 = list(self.left_joint.position[:6])
-            self.publish_joints(left6, list(interp), INITIAL_GRIPPER, INITIAL_GRIPPER)
+            self.publish_joints(list(interp), INITIAL_GRIPPER)
             self._draw_hud_text(["BOOTING", f"alpha = {alpha:.2f}"], colors=[(255, 200, 0), (200, 200, 200)])
             rate.sleep()
-        # Lock in the held targets — main loop will keep publishing these.
-        self.right_target_q = target_q.tolist()
-        self.left_held_q = list(self.left_joint.position[:6])
+        self.target_q = target_q.tolist()
         print("[teleop] Boot ramp done.")
 
         # Compute the EE pose at INITIAL_ARM_JOINTS via FK; store as the
         # teleop-tracking anchor (used by compute_target_pose).
-        fk_xyz, fk_rpy = self._fk_right(target_q)
+        fk_xyz, fk_rpy = self._fk(target_q)
         self.initial_arm_xyz = fk_xyz
         self.initial_arm_R = euler_matrix(*fk_rpy)[:3, :3]
         print(
@@ -276,12 +288,10 @@ class AvpEefController:
                 stroke_width=2, stroke_fill=(0, 0, 0),
             )
 
-        # State name + hint at top
         centered(state.value, 10, self.font_big, STATE_COLOR[state])
         for k, line in enumerate(STATE_HINT[state]):
             centered(line, 80 + k * 32, self.font, (220, 220, 220))
 
-        # Target pose at bottom
         if target_pos is not None and target_rpy is not None:
             centered(
                 f"x={target_pos[0]:+.3f} y={target_pos[1]:+.3f} z={target_pos[2]:+.3f}",
@@ -295,7 +305,6 @@ class AvpEefController:
 
         if ik_msg:
             centered(ik_msg, 200, self.font, (255, 90, 90))
-        # frame# bottom-right
         text = f"#{self.frame_idx}"
         w = draw.textlength(text, font=self.font)
         draw.text(
@@ -314,7 +323,6 @@ class AvpEefController:
         while not rospy.is_shutdown():
             self.frame_idx += 1
 
-            # Gesture
             ll = self.vr.left_landmarks
             rl = self.vr.right_landmarks
             l_pinch = float(np.linalg.norm(ll[THUMB] - ll[MIDDLE]))
@@ -322,7 +330,6 @@ class AvpEefController:
             prev_state = self.fsm.state
             state = self.fsm.update(l_pinch, r_pinch)
 
-            # On IDLE -> LOCKED transition: capture origin head pose.
             if prev_state is State.IDLE and state is State.LOCKED:
                 self.head_pose_at_lock = self.vr.head_matrix.copy()
                 hp = self.head_pose_at_lock[:3, 3]
@@ -334,20 +341,19 @@ class AvpEefController:
             if state is State.ENGAGED and self.head_pose_at_lock is not None:
                 head_now = self.vr.head_matrix
                 target_pos, target_rpy = self.compute_target_pose(head_now)
-                seed = list(self.right_joint.position[:6]) if self.right_joint else None
-                sol, ok, ik_msg_now = self.right_ik.solve(
+                seed = list(self.joint.position[:6]) if self.joint else None
+                sol, ok, ik_msg_now = self.ik.solve(
                     target_pos, target_rpy, gripper=INITIAL_GRIPPER, motorstate=seed
                 )
                 if ok:
-                    self.right_target_q = list(sol)   # update only on success
+                    self.target_q = list(sol)
                     ik_msg = ""
                 else:
                     ik_msg = f"IK fail: {ik_msg_now}"
             else:
                 ik_msg = ""
 
-            # Persistent hold: keep publishing the latest committed joint targets.
-            self.publish_joints(self.left_held_q, self.right_target_q, INITIAL_GRIPPER, INITIAL_GRIPPER)
+            self.publish_joints(self.target_q, INITIAL_GRIPPER)
             self.update_hud(state, target_pos, target_rpy, ik_msg)
 
             now = time.monotonic()
@@ -370,42 +376,58 @@ class AvpEefController:
 
     def run(self):
         print("=" * 60)
-        print("AVP head -> Piper right EE teleop")
+        print(f"AVP head -> Piper {self.arm.upper()} EE teleop")
         print("On AVP Safari open:")
         print("    https://10.7.132.66:8012?ws=wss://10.7.132.66:8012")
-        print(f"INITIAL_ARM_JOINTS = {INITIAL_ARM_JOINTS}")
-        print(f"INITIAL_GRIPPER    = {INITIAL_GRIPPER}")
-        print(f"scale              = {self.scale}")
+        print(f"  arm                = {self.arm}")
+        print(f"  joint_topic        = {self.args.joint_topic}")
+        print(f"  cmd_topic          = {self.args.cmd_topic}")
+        print(f"  camera_topic       = {self.args.camera_topic}")
+        print(f"  INITIAL_ARM_JOINTS = {INITIAL_ARM_JOINTS}")
+        print(f"  INITIAL_GRIPPER    = {INITIAL_GRIPPER}")
+        print(f"  scale              = {self.scale}")
         print("=" * 60)
         print("[teleop] Waiting for joint feedback (10s timeout)...")
         if not self.wait_feedback(10.0):
-            print("[teleop] Timed out. Is /puppet/joint_left,right being published?")
+            print(f"[teleop] Timed out. Is {self.args.joint_topic} being published?")
             return
-        print(f"[teleop] left  joint = {np.array(self.left_joint.position).round(3).tolist()}")
-        print(f"[teleop] right joint = {np.array(self.right_joint.position).round(3).tolist()}")
+        print(f"[teleop] {self.arm} joint = {np.array(self.joint.position).round(3).tolist()}")
         self.boot_ramp_to_initial(duration=self.args.boot_duration)
-        print("[teleop] Pinch L thumb+middle to LOCK, then HOLD R thumb+middle to ENGAGE.")
+        print("[teleop] Pinch L thumb+middle to LOCK, then pinch R thumb+middle to ENGAGE.")
         self.main_loop()
 
 
 def get_args():
-    p = argparse.ArgumentParser(description="AVP head-pose -> Piper right EE teleop")
-    p.add_argument("--left_joint_topic",  type=str, default="/puppet/joint_left")
-    p.add_argument("--right_joint_topic", type=str, default="/puppet/joint_right")
-    p.add_argument("--left_cmd_topic",    type=str, default="/master/joint_left")
-    p.add_argument("--right_cmd_topic",   type=str, default="/master/joint_right")
+    p = argparse.ArgumentParser(description="AVP head-pose -> Piper single-arm EE teleop")
+    p.add_argument("--arm", type=str, default=None,
+                   help="Which arm to control: l/m/r or left/mid/right. Default prompt at startup; pass 'm' for mid.")
+
+    # Derived from --arm; can be overridden.
+    p.add_argument("--joint_topic",  type=str, default=None)
+    p.add_argument("--cmd_topic",    type=str, default=None)
+    p.add_argument("--camera_topic", type=str, default=None,
+                   help="Color camera topic for the chosen arm; piped into the AVP HUD background.")
+
     default_urdf = (
         "/home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/urdf/"
         "piper_description_new.urdf"
     )
-    p.add_argument("--right_urdf", type=str, default=default_urdf)
-    p.add_argument("--right_camera_topic", type=str, default="/camera_r/color/image_raw",
-                   help="Right-arm color camera topic; piped into the AVP HUD background.")
-    p.add_argument("--scale", type=float, default=1.0,
+    p.add_argument("--urdf", type=str, default=default_urdf)
+
+    p.add_argument("--scale", type=float, default=0.9,
                    help="Position-only scale factor: head delta * scale = EE delta.")
     p.add_argument("--boot_duration", type=float, default=3.0,
-                   help="Seconds to ramp from current right-arm pose to INITIAL_ARM_POSE.")
-    return p.parse_args()
+                   help="Seconds to ramp from current arm pose to INITIAL_ARM_JOINTS.")
+
+    args = p.parse_args()
+
+    args.arm = resolve_arm(args.arm)
+    if args.joint_topic  is None: args.joint_topic  = "/puppet/joint_%s"  % args.arm
+    if args.cmd_topic    is None: args.cmd_topic    = "/master/joint_%s"  % args.arm
+    if args.camera_topic is None:
+        args.camera_topic = "/camera_%s/color/image_raw" % ARM_CAM_SHORT[args.arm]
+
+    return args
 
 
 def main():

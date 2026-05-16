@@ -51,3 +51,11 @@ python3 teleop/joint_keyboard_control_singlearm.py --arm m     # mid
 python3 teleop/joint_keyboard_control_singlearm.py --arm l     # left
 python3 teleop/joint_keyboard_control_singlearm.py --arm r     # right
 ```
+
+
+# 6. 机械臂单臂 apple vision pro 测试
+```bash
+conda activate aloha
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop
+python eef_avp_control.py --arm m
+```
