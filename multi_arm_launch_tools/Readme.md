@@ -57,5 +57,5 @@ python3 teleop/joint_keyboard_control_singlearm.py --arm r     # right
 ```bash
 conda activate aloha
 cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop
-python eef_avp_control.py --arm m
+python eef_avp_control_singlearm.py --arm m
 ```

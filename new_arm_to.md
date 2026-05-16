@@ -62,7 +62,7 @@
 ## Phase C — 接入遥操作 / 推理(晚些时候)
 
 - [ ] 决定 mid 臂遥操作方式(键盘 / AVP 跟手 / 主臂从动 / ...)
-- [ ] 自己写 teleop 脚本(参考现有 `joint_keyboard_control.py` / `eef_keyboard_control.py`)
+- [ ] 自己写 teleop 脚本(参考现有 `joint_keyboard_control_singlearm.py` / `eef_keyboard_control_singlearm.py`)
 - [ ] 决定推理时 mid 臂的角色(被动 / 主动控制)
 - [ ] 自己写 inference 脚本扩展
 

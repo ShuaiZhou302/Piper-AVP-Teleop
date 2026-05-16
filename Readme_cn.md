@@ -23,59 +23,61 @@ roslaunch astra_camera multi_camera.launch
 ```
 
 ```bash
-# 4. 控制脚本(选一个)
+# 4. 控制脚本(选一个)。两个脚本都接 --arm l/m/r,缺省则启动时交互式提示。
 cd /home/agilex/cobot_magic/aloha-devel
-bash act/inference.sh                                                                       # 推理
-python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/joint_keyboard_control.py  # 关节键盘控制
-python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keyboard_control.py    # 末端键盘控制
+bash act/inference.sh                                                                                  # 推理
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/joint_keyboard_control_singlearm.py --arm m  # 关节键盘控制
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keyboard_control_singlearm.py   --arm m  # 末端键盘控制
 ```
 
 > ⚠️ 推理时注意安全,行为不正常立即中断代码或断电。
 
 ## Joint维度对照表
 
-| 左臂 dim | 右臂 dim | 含义 |
-| --- | --- | --- |
-| 0 | 7 | 底座 z 轴旋转 |
-| 1 | 8 | 底座 joint |
-| 2 | 9 | 大臂 joint |
-| 3 | 10 | 小臂(以臂为轴旋转) |
-| 4 | 11 | 小臂 joint |
-| 5 | 12 | 腕部(以臂为轴旋转) |
-| 6 | 13 | 夹爪(0–0.1, 关–开) |
+`joint_keyboard_control_singlearm.py` 通过 `--arm l/m/r` 选定一个臂,dim 0–6 即针对该臂。
+
+| dim | 含义 |
+| --- | --- |
+| 0 | 底座 z 轴旋转 |
+| 1 | 底座 joint |
+| 2 | 大臂 joint |
+| 3 | 小臂(以臂为轴旋转) |
+| 4 | 小臂 joint |
+| 5 | 腕部(以臂为轴旋转) |
+| 6 | 夹爪(0–0.1, 关–开) |
 
 ## EEF维度对照表
 
 末端执行器位姿 = 平移 (xyz, m) + 姿态 (rpy, rad,sxyz/外旋约定),坐标系是 base → EE。
 
-| 左臂 dim | 右臂 dim | 含义 | 单位 | step 默认值 |
-| --- | --- | --- | --- | --- |
-| 0  | 7  | x —— EE 在 base frame 下的 X 位置 &nbsp;&nbsp;**(+x 向前)** | m | 0.002 |
-| 1  | 8  | y —— EE 在 base frame 下的 Y 位置 &nbsp;&nbsp;**(+y 向左)** | m | 0.002 |
-| 2  | 9  | z —— EE 在 base frame 下的 Z 位置 &nbsp;&nbsp;**(+z 向上)** | m | 0.002 |
-| 3  | 10 | roll  —— 绕 base X 轴旋转(外旋,sxyz 第 1 步) &nbsp;&nbsp;**(+roll 向右倾)** | rad | 0.01 |
-| 4  | 11 | pitch —— 绕 base Y 轴旋转(外旋,sxyz 第 2 步) &nbsp;&nbsp;**(+pitch 低头/向下)** | rad | 0.01 |
-| 5  | 12 | yaw   —— 绕 base Z 轴旋转(外旋,sxyz 第 3 步) &nbsp;&nbsp;**(+yaw 向左转)** | rad | 0.01 |
-| 6  | 13 | 夹爪开合(0–0.1, 关–开) | m | 0.002 |
+| dim | 含义 | 单位 | step 默认值 |
+| --- | --- | --- | --- |
+| 0 | x —— EE 在 base frame 下的 X 位置 &nbsp;&nbsp;**(+x 向前)** | m | 0.002 |
+| 1 | y —— EE 在 base frame 下的 Y 位置 &nbsp;&nbsp;**(+y 向左)** | m | 0.002 |
+| 2 | z —— EE 在 base frame 下的 Z 位置 &nbsp;&nbsp;**(+z 向上)** | m | 0.002 |
+| 3 | roll  —— 绕 base X 轴旋转(外旋,sxyz 第 1 步) &nbsp;&nbsp;**(+roll 向右倾)** | rad | 0.01 |
+| 4 | pitch —— 绕 base Y 轴旋转(外旋,sxyz 第 2 步) &nbsp;&nbsp;**(+pitch 低头/向下)** | rad | 0.01 |
+| 5 | yaw   —— 绕 base Z 轴旋转(外旋,sxyz 第 3 步) &nbsp;&nbsp;**(+yaw 向左转)** | rad | 0.01 |
+| 6 | 夹爪开合(0–0.1, 关–开) | m | 0.002 |
 
-> 上述正方向都是用 `eef_keyboard_control.py` 单轴点动 + 观察真机得到的实测结果。
+> 上述正方向都是用 `eef_keyboard_control_singlearm.py` 单轴点动 + 观察真机得到的实测结果。
 
 > rpy 是 ROS / 航空标准的 sxyz 约定 —— 等价说法是"绕固定 base 轴依次 X→Y→Z 旋转",或"绕本体当前轴依次 Z→Y→X 旋转(顺序反过来)"。pitch 接近 ±90° 会进入万向锁,届时 roll/yaw 数值会退化耦合。
 
 ## EEF 坐标系约定
 
-`/puppet/end_pose_*` 报的位姿是 URDF 里 **joint6 frame**,不是物理夹爪/相机的 frame。eef_keyboard_control.py 在 IK 模型里加了一个静态偏移,把控制对象切换成了**摄像头位姿**(不是夹爪):
+`/puppet/end_pose_*` 报的位姿是 URDF 里 **joint6 frame**,不是物理夹爪/相机的 frame。`eef_keyboard_control_singlearm.py` 在 IK 模型里加了一个静态偏移,把控制对象切换成了**摄像头位姿**(不是夹爪):
 
 | 维度 | 偏移(joint6 局部系下) |
 | --- | --- |
 | 平移 | `-X 方向 0.05 m` |
 | 旋转 | `Ry(-90°)` |
 
-代码位置:[eef_keyboard_control.py:37-50](eef_keyboard_control.py#L37-L50) 的 `addFrame`。
+代码位置:[eef_keyboard_control_singlearm.py:37-50](teleop/eef_keyboard_control_singlearm.py#L37-L50) 的 `addFrame`。
 
-**想看 joint6 在真机上具体在哪儿**:跑 `joint_keyboard_control.py`,选 dim **5** (左臂腕部) 或 **12** (右臂腕部),按 w/s,转动的那个关节就是 joint6。
+**想看 joint6 在真机上具体在哪儿**:跑 `joint_keyboard_control_singlearm.py --arm m`(或 l/r),选 dim **5**(腕部),按 w/s,转动的那个关节就是 joint6。
 
-**想换成夹爪的位姿**:夹爪和摄像头共用同一个旋转偏移(`Ry(-90°)`),只是没有那 5cm 平移。把 [eef_keyboard_control.py:47](eef_keyboard_control.py#L47) 的平移向量改为零即可,旋转那行(line 40)保持不动。
+**想换成夹爪的位姿**:夹爪和摄像头共用同一个旋转偏移(`Ry(-90°)`),只是没有那 5cm 平移。把 [eef_keyboard_control_singlearm.py:47](teleop/eef_keyboard_control_singlearm.py#L47) 的平移向量改为零即可,旋转那行(line 40)保持不动。
 
 ```python
 # 当前(摄像头位姿)

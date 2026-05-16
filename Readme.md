@@ -23,59 +23,61 @@ roslaunch astra_camera multi_camera.launch
 ```
 
 ```bash
-# 4. Control script (pick one)
+# 4. Control script (pick one). Both scripts take --arm l/m/r (or prompt if omitted).
 cd /home/agilex/cobot_magic/aloha-devel
-bash act/inference.sh                                                                       # inference
-python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/joint_keyboard_control.py  # joint-space keyboard
-python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keyboard_control.py    # end-effector keyboard
+bash act/inference.sh                                                                                  # inference
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/joint_keyboard_control_singlearm.py --arm m  # joint-space keyboard
+python /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop/eef_keyboard_control_singlearm.py   --arm m  # end-effector keyboard
 ```
 
 > ⚠️ Stay alert during inference. If the arm misbehaves, stop the script or cut power immediately.
 
 ## Joint Dimension Map
 
-| Left arm dim | Right arm dim | Description |
-| --- | --- | --- |
-| 0 | 7  | base z-axis rotation |
-| 1 | 8  | base joint |
-| 2 | 9  | upper-arm joint |
-| 3 | 10 | forearm (rotation about its own axis) |
-| 4 | 11 | forearm joint |
-| 5 | 12 | wrist (rotation about its own axis) |
-| 6 | 13 | gripper (0–0.1, closed–open) |
+`joint_keyboard_control_singlearm.py` selects one arm via `--arm l/m/r`, then dims 0–6 refer to that arm only.
+
+| dim | Description |
+| --- | --- |
+| 0 | base z-axis rotation |
+| 1 | base joint |
+| 2 | upper-arm joint |
+| 3 | forearm (rotation about its own axis) |
+| 4 | forearm joint |
+| 5 | wrist (rotation about its own axis) |
+| 6 | gripper (0–0.1, closed–open) |
 
 ## EEF Dimension Map
 
 End-effector pose = translation (xyz, m) + orientation (rpy, rad, sxyz / extrinsic convention), expressed in base → EE.
 
-| Left dim | Right dim | Description | Unit | Default step |
-| --- | --- | --- | --- | --- |
-| 0  | 7  | x — EE X in base frame &nbsp;&nbsp;**(+x forward)** | m | 0.002 |
-| 1  | 8  | y — EE Y in base frame &nbsp;&nbsp;**(+y left)**    | m | 0.002 |
-| 2  | 9  | z — EE Z in base frame &nbsp;&nbsp;**(+z up)**      | m | 0.002 |
-| 3  | 10 | roll  — rotation about base X (extrinsic, sxyz step 1) &nbsp;&nbsp;**(+roll tilts right)** | rad | 0.01 |
-| 4  | 11 | pitch — rotation about base Y (extrinsic, sxyz step 2) &nbsp;&nbsp;**(+pitch tilts down / nods down)** | rad | 0.01 |
-| 5  | 12 | yaw   — rotation about base Z (extrinsic, sxyz step 3) &nbsp;&nbsp;**(+yaw turns left)** | rad | 0.01 |
-| 6  | 13 | gripper opening (0–0.1, closed–open) | m | 0.002 |
+| dim | Description | Unit | Default step |
+| --- | --- | --- | --- |
+| 0 | x — EE X in base frame &nbsp;&nbsp;**(+x forward)** | m | 0.002 |
+| 1 | y — EE Y in base frame &nbsp;&nbsp;**(+y left)**    | m | 0.002 |
+| 2 | z — EE Z in base frame &nbsp;&nbsp;**(+z up)**      | m | 0.002 |
+| 3 | roll  — rotation about base X (extrinsic, sxyz step 1) &nbsp;&nbsp;**(+roll tilts right)** | rad | 0.01 |
+| 4 | pitch — rotation about base Y (extrinsic, sxyz step 2) &nbsp;&nbsp;**(+pitch tilts down / nods down)** | rad | 0.01 |
+| 5 | yaw   — rotation about base Z (extrinsic, sxyz step 3) &nbsp;&nbsp;**(+yaw turns left)** | rad | 0.01 |
+| 6 | gripper opening (0–0.1, closed–open) | m | 0.002 |
 
-> Sign conventions above are verified empirically by jogging each axis in `eef_keyboard_control.py` and observing the real arm.
+> Sign conventions above are verified empirically by jogging each axis in `eef_keyboard_control_singlearm.py` and observing the real arm.
 
 > rpy follows the ROS / aerospace `sxyz` convention. Equivalent readings: "rotate about the fixed base axes in order X→Y→Z" or, equivalently, "rotate about the current body axes in order Z→Y→X (reversed)". When pitch approaches ±90° you enter gimbal lock and the roll / yaw values become coupled.
 
 ## EEF Frame Convention
 
-`/puppet/end_pose_*` reports the pose of the **joint6 frame** in the URDF — NOT the physical gripper / camera frame. `eef_keyboard_control.py` adds a static offset inside the IK model to switch the controlled frame to the **camera pose** (not the gripper):
+`/puppet/end_pose_*` reports the pose of the **joint6 frame** in the URDF — NOT the physical gripper / camera frame. `eef_keyboard_control_singlearm.py` adds a static offset inside the IK model to switch the controlled frame to the **camera pose** (not the gripper):
 
 | Component | Offset (in joint6 local frame) |
 | --- | --- |
 | Translation | `0.05 m along -X` |
 | Rotation    | `Ry(-90°)` |
 
-Code location: [eef_keyboard_control.py:37-50](teleop/eef_keyboard_control.py#L37-L50), the `addFrame` call.
+Code location: [eef_keyboard_control_singlearm.py:37-50](teleop/eef_keyboard_control_singlearm.py#L37-L50), the `addFrame` call.
 
-**To find joint6 on the real robot**: run `joint_keyboard_control.py`, select dim **5** (left wrist) or **12** (right wrist), press w/s — the joint that moves is joint6.
+**To find joint6 on the real robot**: run `joint_keyboard_control_singlearm.py --arm m` (or l/r), select dim **5** (wrist), press w/s — the joint that moves is joint6.
 
-**To switch to the gripper pose**: the gripper shares the same rotational offset (`Ry(-90°)`) but has no 5 cm translation. Just set the translation vector at [eef_keyboard_control.py:47](teleop/eef_keyboard_control.py#L47) to zero; leave the rotation line (line 40) untouched.
+**To switch to the gripper pose**: the gripper shares the same rotational offset (`Ry(-90°)`) but has no 5 cm translation. Just set the translation vector at [eef_keyboard_control_singlearm.py:47](teleop/eef_keyboard_control_singlearm.py#L47) to zero; leave the rotation line (line 40) untouched.
 
 ```python
 # Current (camera pose)

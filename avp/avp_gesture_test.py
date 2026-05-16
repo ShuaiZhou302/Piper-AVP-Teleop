@@ -52,6 +52,39 @@ class State(Enum):
     ENGAGED = "ENGAGED"
 
 
+class HandFreshness:
+    """Detect whether WebXR hand tracking is currently valid.
+
+    Vuer / WebXR keeps reporting the LAST landmark frame when a hand leaves
+    the AVP camera FOV — so a "frozen" hand looks just like a held pose.
+    If we feed those stale values into the pinch distance, a hand that left
+    the view while pinching (or one never tracked, all zeros) will keep
+    triggering. We detect freshness by:
+      * all-zeros = never tracked yet
+      * bitwise-identical to previous frame for N consecutive reads = frozen
+
+    Real WebXR hand tracking always jitters at FP precision; exact bit
+    equality across multiple reads basically means no updates arrived.
+    """
+
+    def __init__(self, stale_threshold=10):
+        self._prev = None
+        self._stale = 0
+        self._threshold = stale_threshold
+
+    def is_fresh(self, landmarks: np.ndarray) -> bool:
+        if np.all(landmarks == 0):
+            self._prev = None
+            self._stale = self._threshold + 1
+            return False
+        if self._prev is not None and np.array_equal(landmarks, self._prev):
+            self._stale += 1
+        else:
+            self._stale = 0
+        self._prev = landmarks.copy()
+        return self._stale < self._threshold
+
+
 class GestureStateMachine:
     """Toggle-style state machine driven by left/right thumb-middle pinch.
 
@@ -157,17 +190,22 @@ def main():
         font = ImageFont.load_default()
 
     fsm = GestureStateMachine()
+    l_fresh = HandFreshness()
+    r_fresh = HandFreshness()
     last_state = None
     last_print = 0.0
     i = 0
+    STALE_OPEN = 1.0  # fake "fully open" pinch distance when hand is stale
 
     try:
         while True:
             i += 1
             L = vr.left_landmarks    # (25, 3)
             R = vr.right_landmarks
-            l_pinch = float(np.linalg.norm(L[THUMB] - L[MIDDLE]))
-            r_pinch = float(np.linalg.norm(R[THUMB] - R[MIDDLE]))
+            l_ok = l_fresh.is_fresh(L)
+            r_ok = r_fresh.is_fresh(R)
+            l_pinch = float(np.linalg.norm(L[THUMB] - L[MIDDLE])) if l_ok else STALE_OPEN
+            r_pinch = float(np.linalg.norm(R[THUMB] - R[MIDDLE])) if r_ok else STALE_OPEN
 
             prev = fsm.state
             state = fsm.update(l_pinch, r_pinch)
@@ -196,8 +234,12 @@ def main():
             centered(state.value, 60, font_big, STATE_COLOR[state])
             for k, line in enumerate(STATE_HINT[state]):
                 centered(line, 150 + k * 40, font, (200, 200, 200))
-            centered(f"L pinch = {l_pinch:.3f} m", 250, font, (255, 255, 255))
-            centered(f"R pinch = {r_pinch:.3f} m", 295, font, (255, 255, 255))
+            l_col = (255, 255, 255) if l_ok else (255, 110, 110)
+            r_col = (255, 255, 255) if r_ok else (255, 110, 110)
+            l_tag = "" if l_ok else "  (stale)"
+            r_tag = "" if r_ok else "  (stale)"
+            centered(f"L pinch = {l_pinch:.3f} m{l_tag}", 250, font, l_col)
+            centered(f"R pinch = {r_pinch:.3f} m{r_tag}", 295, font, r_col)
             centered(f"frame #{i}", 400, font, (140, 140, 140))
             img_view[:] = np.array(canvas)
 

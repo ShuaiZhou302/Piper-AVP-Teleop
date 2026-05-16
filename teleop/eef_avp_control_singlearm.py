@@ -17,7 +17,7 @@ Run:
 # Boot ramp drives joint angles directly to these values; the corresponding
 # EE pose is derived from FK at runtime and used as the teleop reset anchor.
 # Same Piper hardware on all three arms -> same "ready" joint config works.
-INITIAL_ARM_JOINTS = (-0.0982, 0.4652, -0.7781, -0.0486, 0.4096, 0.0692)
+INITIAL_ARM_JOINTS = (0.0000, 0.5652, -0.7781, -0.0086, 0.4096, 0.0692)
 INITIAL_GRIPPER = 0.1
 
 import argparse
@@ -37,10 +37,11 @@ AVP_DIR = os.path.normpath(os.path.join(HERE, "..", "avp"))
 sys.path.insert(0, AVP_DIR)
 sys.path.insert(0, HERE)
 
-from eef_keyboard_control import PinocchioIKSolver  # noqa: E402  (loads casadi)
+from eef_keyboard_control_singlearm import PinocchioIKSolver  # noqa: E402  (loads casadi)
 import pinocchio as pin  # noqa: E402  (already in-process via the line above)
 from avp_gesture_test import (  # noqa: E402
-    GestureStateMachine, State, THUMB, MIDDLE, STATE_COLOR, STATE_HINT,
+    GestureStateMachine, HandFreshness,
+    State, THUMB, MIDDLE, STATE_COLOR, STATE_HINT,
 )
 from tele_vision import OpenTeleVision  # noqa: E402
 
@@ -133,6 +134,8 @@ class AvpEefController:
 
         # State machine
         self.fsm = GestureStateMachine()
+        self._l_fresh = HandFreshness()
+        self._r_fresh = HandFreshness()
         self.head_pose_at_lock = None  # (4, 4) head pose in AVP world at lock time
         self.frame_idx = 0
         self.last_print = 0.0
@@ -325,8 +328,11 @@ class AvpEefController:
 
             ll = self.vr.left_landmarks
             rl = self.vr.right_landmarks
-            l_pinch = float(np.linalg.norm(ll[THUMB] - ll[MIDDLE]))
-            r_pinch = float(np.linalg.norm(rl[THUMB] - rl[MIDDLE]))
+            l_ok = self._l_fresh.is_fresh(ll)
+            r_ok = self._r_fresh.is_fresh(rl)
+            STALE_OPEN = 1.0  # fake fully-open pinch when hand is out of FOV
+            l_pinch = float(np.linalg.norm(ll[THUMB] - ll[MIDDLE])) if l_ok else STALE_OPEN
+            r_pinch = float(np.linalg.norm(rl[THUMB] - rl[MIDDLE])) if r_ok else STALE_OPEN
             prev_state = self.fsm.state
             state = self.fsm.update(l_pinch, r_pinch)
 
@@ -341,13 +347,33 @@ class AvpEefController:
             if state is State.ENGAGED and self.head_pose_at_lock is not None:
                 head_now = self.vr.head_matrix
                 target_pos, target_rpy = self.compute_target_pose(head_now)
-                seed = list(self.joint.position[:6]) if self.joint else None
+                # Seed IK with the last command, NOT the puppet feedback.
+                # Feedback lags command, so seeding with it can flip the IK
+                # solver to a different (uglier) solution branch each frame,
+                # which shows up as the arm jittering / hopping at certain poses.
+                seed = self.target_q if self.target_q is not None else (
+                    list(self.joint.position[:6]) if self.joint else None
+                )
                 sol, ok, ik_msg_now = self.ik.solve(
                     target_pos, target_rpy, gripper=INITIAL_GRIPPER, motorstate=seed
                 )
                 if ok:
-                    self.target_q = list(sol)
-                    ik_msg = ""
+                    # Per-joint step limit: clip IK output to +/- max_joint_step
+                    # of the previous command. Catches residual big jumps the
+                    # seed-fix alone can't kill (e.g., wrist near gimbal lock).
+                    sol_arr = np.asarray(sol, dtype=float)
+                    if self.target_q is not None:
+                        prev = np.asarray(self.target_q, dtype=float)
+                        step = self.args.max_joint_step
+                        delta = sol_arr - prev
+                        if np.max(np.abs(delta)) > step:
+                            sol_arr = np.clip(sol_arr, prev - step, prev + step)
+                            ik_msg = "clipped"
+                        else:
+                            ik_msg = ""
+                    else:
+                        ik_msg = ""
+                    self.target_q = sol_arr.tolist()
                 else:
                     ik_msg = f"IK fail: {ik_msg_now}"
             else:
@@ -418,6 +444,9 @@ def get_args():
                    help="Position-only scale factor: head delta * scale = EE delta.")
     p.add_argument("--boot_duration", type=float, default=3.0,
                    help="Seconds to ramp from current arm pose to INITIAL_ARM_JOINTS.")
+    p.add_argument("--max_joint_step", type=float, default=0.05,
+                   help="Max per-joint change per main-loop frame in rad. "
+                        "0.05 rad/frame @ 30 Hz = 1.5 rad/s ~= 86 deg/s. Caps IK jumps.")
 
     args = p.parse_args()
 
