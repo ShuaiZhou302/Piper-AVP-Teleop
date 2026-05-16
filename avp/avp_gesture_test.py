@@ -7,8 +7,12 @@ before wiring the state machine into the actual arm controller.
 
 Gestures (all rising-edge with Schmitt-trigger hysteresis):
   Left  thumb+middle pinch : IDLE    -> LOCKED
-  Right thumb+middle pinch : LOCKED  -> ENGAGED   (1st pinch = start)
-  Right thumb+middle pinch : ENGAGED -> LOCKED    (2nd pinch = pause/end)
+  Right thumb+middle pinch : LOCKED  -> ARMED    (1st pinch = arm, safety)
+  Right thumb+middle pinch : ARMED   -> ENGAGED  (2nd pinch within timeout = confirm)
+  (timeout)                : ARMED   -> LOCKED   (no confirm -> auto-cancel)
+  Right thumb+middle pinch : ENGAGED -> LOCKED   (single pinch = pause/end)
+Two-pinch arm-then-confirm gate makes accidental engage much less likely;
+disengage is single-pinch on purpose so user can pause quickly.
 
 Run:
   conda activate aloha
@@ -49,7 +53,12 @@ PINCH_OPEN = 0.04
 class State(Enum):
     IDLE = "IDLE"
     LOCKED = "LOCKED"
+    ARMED = "ARMED"       # 1st right pinch done; waiting for 2nd to confirm
     ENGAGED = "ENGAGED"
+
+
+# How long ARMED stays armed before auto-cancelling back to LOCKED (seconds).
+ARMED_TIMEOUT_S = 2.0
 
 
 class HandFreshness:
@@ -86,11 +95,13 @@ class HandFreshness:
 
 
 class GestureStateMachine:
-    """Toggle-style state machine driven by left/right thumb-middle pinch.
+    """Two-pinch-to-engage state machine driven by left/right thumb-middle pinch.
 
-    IDLE     --[L pinch rising edge]--> LOCKED
-    LOCKED   --[R pinch rising edge]--> ENGAGED
-    ENGAGED  --[R pinch rising edge]--> LOCKED  (toggle, NOT deadman)
+    IDLE    --[L pinch rising edge]----------> LOCKED
+    LOCKED  --[R pinch rising edge]----------> ARMED      (1st right pinch)
+    ARMED   --[R pinch rising edge]----------> ENGAGED    (2nd right pinch confirms)
+    ARMED   --[ARMED_TIMEOUT_S elapsed]------> LOCKED     (auto-cancel)
+    ENGAGED --[R pinch rising edge]----------> LOCKED     (single pinch to pause)
 
     Both pinches use Schmitt-trigger hysteresis (PINCH_CLOSE / PINCH_OPEN) so
     a wobbling distance near the threshold doesn't cause spurious transitions.
@@ -98,10 +109,12 @@ class GestureStateMachine:
     avoiding accidental triggers if the program starts mid-pinch.
     """
 
-    def __init__(self):
+    def __init__(self, armed_timeout_s: float = ARMED_TIMEOUT_S):
         self.state = State.IDLE
         self._left_was_closed = True
         self._right_was_closed = True
+        self._armed_at = 0.0
+        self.armed_timeout_s = armed_timeout_s
 
     @staticmethod
     def _phys_closed(was_closed: bool, dist: float) -> bool:
@@ -110,7 +123,14 @@ class GestureStateMachine:
             return dist < PINCH_OPEN
         return dist < PINCH_CLOSE
 
+    def time_left_armed(self) -> float:
+        """Seconds remaining in ARMED window. 0 outside ARMED."""
+        if self.state is not State.ARMED:
+            return 0.0
+        return max(0.0, self.armed_timeout_s - (time.monotonic() - self._armed_at))
+
     def update(self, left_pinch_dist: float, right_pinch_dist: float) -> State:
+        now = time.monotonic()
         left_closed = self._phys_closed(self._left_was_closed, left_pinch_dist)
         right_closed = self._phys_closed(self._right_was_closed, right_pinch_dist)
         left_rising = left_closed and not self._left_was_closed
@@ -121,7 +141,13 @@ class GestureStateMachine:
                 self.state = State.LOCKED
         elif self.state is State.LOCKED:
             if right_rising:
+                self.state = State.ARMED
+                self._armed_at = now
+        elif self.state is State.ARMED:
+            if right_rising:
                 self.state = State.ENGAGED
+            elif (now - self._armed_at) > self.armed_timeout_s:
+                self.state = State.LOCKED
         elif self.state is State.ENGAGED:
             if right_rising:
                 self.state = State.LOCKED
@@ -136,13 +162,15 @@ class GestureStateMachine:
 STATE_COLOR = {
     State.IDLE:    (180, 180, 180),
     State.LOCKED:  (255, 200,   0),
+    State.ARMED:   (255, 130,   0),   # orange: about to commit
     State.ENGAGED: (  0, 255,  80),
 }
 
 STATE_HINT = {
     State.IDLE:    ["Pinch L thumb+middle", "to LOCK"],
-    State.LOCKED:  ["Pinch R thumb+middle", "to ENGAGE"],
-    State.ENGAGED: ["Pinch R thumb+middle", "again to PAUSE"],
+    State.LOCKED:  ["Pinch R thumb+middle", "to ARM"],
+    State.ARMED:   ["Pinch R again to", "CONFIRM ENGAGE"],
+    State.ENGAGED: ["Pinch R thumb+middle", "to PAUSE"],
 }
 
 

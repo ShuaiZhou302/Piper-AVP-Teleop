@@ -17,7 +17,7 @@ Run:
 # Boot ramp drives joint angles directly to these values; the corresponding
 # EE pose is derived from FK at runtime and used as the teleop reset anchor.
 # Same Piper hardware on all three arms -> same "ready" joint config works.
-INITIAL_ARM_JOINTS = (0.0000, 0.5652, -0.7781, -0.0086, 0.4096, 0.0692)
+INITIAL_ARM_JOINTS = (0.0000, 0.5652, -0.8781, -0.0086, 0.4596, 0.0292)
 INITIAL_GRIPPER = 0.1
 
 import argparse
@@ -48,9 +48,12 @@ from tele_vision import OpenTeleVision  # noqa: E402
 # ROS imports come after casadi is in.
 import rospy  # noqa: E402
 from sensor_msgs.msg import JointState, Image as ImageMsg  # noqa: E402
-from std_msgs.msg import Header  # noqa: E402
+from std_msgs.msg import Header, String  # noqa: E402
 from tf.transformations import euler_matrix, euler_from_matrix  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
+
+# Topic the gesture state is broadcast on (subscribed by collect_data_3arm.py).
+TELEOP_STATE_TOPIC = "/teleop/state"
 
 
 # Arm name normalization, matches eef_keyboard_control_singlearm.py.
@@ -128,6 +131,10 @@ class AvpEefController:
             args.camera_topic, ImageMsg, self._camera_cb, queue_size=1, buff_size=2 ** 24
         )
         self.pub = rospy.Publisher(args.cmd_topic, JointState, queue_size=10)
+
+        # Broadcast gesture state so collect_data_3arm.py can start/stop
+        # recording on ENGAGED / LOCKED transitions.
+        self.state_pub = rospy.Publisher(TELEOP_STATE_TOPIC, String, queue_size=1)
 
         # IK
         self.ik = PinocchioIKSolver(args.urdf)
@@ -380,6 +387,7 @@ class AvpEefController:
                 ik_msg = ""
 
             self.publish_joints(self.target_q, INITIAL_GRIPPER)
+            self.state_pub.publish(String(data=state.value))
             self.update_hud(state, target_pos, target_rpy, ik_msg)
 
             now = time.monotonic()
@@ -440,7 +448,7 @@ def get_args():
     )
     p.add_argument("--urdf", type=str, default=default_urdf)
 
-    p.add_argument("--scale", type=float, default=0.9,
+    p.add_argument("--scale", type=float, default=1.0,
                    help="Position-only scale factor: head delta * scale = EE delta.")
     p.add_argument("--boot_duration", type=float, default=3.0,
                    help="Seconds to ramp from current arm pose to INITIAL_ARM_JOINTS.")

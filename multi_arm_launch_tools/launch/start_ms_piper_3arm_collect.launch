@@ -1,0 +1,54 @@
+<launch>
+  <!--
+    Data-collection mode (shuai):
+      LEFT  + RIGHT : mode=0 master-slave teach.
+                      Operator drags the physical master arms;
+                      /puppet/joint_<l|r> mirrors them. auto_enable irrelevant when mode=0.
+      MID           : mode=1 ROS-driven.
+                      No physical master; piper_start_ms_node subscribes to
+                      /master/joint_mid for joint commands. Motors auto-enable on startup
+                      (auto_enable is gated by mode==1 inside the node, see
+                       piper_start_ms_node.py:58).
+                      eef_avp_control_singlearm.py is the typical publisher
+                      (run it with arm m).
+
+    Override at launch time, e.g.:
+      roslaunch ... start_ms_piper_3arm_collect.launch mid_auto_enable:=false
+  -->
+
+  <!-- Per-arm parameters -->
+  <arg name="lr_mode"         default="0" />
+  <arg name="lr_auto_enable"  default="false" />
+  <arg name="mid_mode"        default="1" />
+  <arg name="mid_auto_enable" default="true" />
+
+  <!-- LEFT arm: master-slave teach -->
+  <node name="$(anon piper_left)" pkg="piper" type="piper_start_ms_node.py" output="screen">
+    <param name="can_port" value="can_left" />
+    <param name="mode" value="$(arg lr_mode)" />
+    <param name="auto_enable" value="$(arg lr_auto_enable)" />
+    <remap from="/puppet/joint_states" to="/puppet/joint_left" />
+    <remap from="/master/joint_states" to="/master/joint_left" />
+    <remap from="/puppet/end_pose" to="/puppet/end_pose_left" />
+  </node>
+
+  <!-- RIGHT arm: master-slave teach -->
+  <node name="$(anon piper_right)" pkg="piper" type="piper_start_ms_node.py" output="screen">
+    <param name="can_port" value="can_right" />
+    <param name="mode" value="$(arg lr_mode)" />
+    <param name="auto_enable" value="$(arg lr_auto_enable)" />
+    <remap from="/puppet/joint_states" to="/puppet/joint_right" />
+    <remap from="/master/joint_states" to="/master/joint_right" />
+    <remap from="/puppet/end_pose" to="/puppet/end_pose_right" />
+  </node>
+
+  <!-- MID arm: ROS-driven (AVP teleop publishes /master/joint_mid) -->
+  <node name="$(anon piper_mid)" pkg="piper" type="piper_start_ms_node.py" output="screen">
+    <param name="can_port" value="can_mid" />
+    <param name="mode" value="$(arg mid_mode)" />
+    <param name="auto_enable" value="$(arg mid_auto_enable)" />
+    <remap from="/puppet/joint_states" to="/puppet/joint_mid" />
+    <remap from="/master/joint_states" to="/master/joint_mid" />
+    <remap from="/puppet/end_pose" to="/puppet/end_pose_mid" />
+  </node>
+</launch>

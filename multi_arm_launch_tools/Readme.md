@@ -59,3 +59,99 @@ conda activate aloha
 cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop
 python eef_avp_control_singlearm.py --arm m
 ```
+
+---
+
+## 数据采集模式 (左右从动 / 中间主动)
+
+替代上面第 2 步的"统一 mode/auto_enable"启动方式。给三个臂**分别**配置:
+
+- **左 / 右臂**:`mode=0`(读物理主臂消息转发)、`auto_enable=false`(motor 不上电,手动拖动)。
+  操作者用双手拖动左右主臂,puppet 自动跟随,作为数据采集的演示源。
+- **中间臂**:`mode=1`(订阅 `/master/joint_mid` 当指令驱动 puppet)、`auto_enable=true`
+  (motor 自动使能)。`eef_avp_control_singlearm.py --arm m` 发命令到 `/master/joint_mid`,
+  中臂跟着头动。
+
+```bash
+# 启动机械臂
+conda activate aloha
+roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/start_ms_piper_3arm_collect.launch
+
+#另外终端启动相机
+conda activate aloha
+roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/multi_camera_shuai.launch
+```
+
+启动后另开终端跑 AVP teleop 控制中臂:
+
+```bash
+conda activate aloha
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop
+python eef_avp_control_singlearm.py --arm m
+```
+
+参数都有默认值,通常不需要传。若需调整:
+
+```bash
+# 例如:暂时关闭中臂自动使能(motor 不上电、安全调试):
+roslaunch ... start_ms_piper_3arm_collect.launch mid_auto_enable:=false
+```
+
+**注意**:`mode` 和 `auto_enable` 的耦合在 `piper_start_ms_node.py:58` 强制写死 ——
+**只有 mode=1 时 auto_enable 才会真正生效**。这就是为什么左右臂的 `lr_auto_enable=false`
+其实是冗余的(mode=0 下无论传 true/false 都不会自动使能)。
+
+---
+
+## 完整数据采集流程(4 终端)
+
+修改 `data_collect/collect_data_3arm.sh` 顶部的参数(任务名、描述、保存路径、episode 数、最大帧数)。
+然后**按下面顺序起 4 个终端**:
+
+```bash
+# 终端 1 — 启动 3 臂(左右 teach、中间 ROS 驱动)
+conda activate aloha
+roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/start_ms_piper_3arm_collect.launch
+```
+
+```bash
+# 终端 2 — 启动 3 路相机
+conda activate aloha
+roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/multi_camera_shuai.launch
+```
+
+```bash
+# 终端 3 — AVP teleop 控制中间臂
+conda activate aloha
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/teleop
+python eef_avp_control_singlearm.py --arm m
+```
+
+```bash
+# 终端 4 — 数据采集(订阅 /teleop/state,等 ENGAGED 才开始录)
+conda activate aloha
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/data_collect
+bash collect_data_3arm.sh
+```
+
+戴 AVP,Safari 进 immersive,按下面**每条 episode 重复**:
+
+| 步骤 | 手势 | HUD 状态 | 含义 |
+|---|---|---|---|
+| 1 | 左手拇指+中指 捏一下 | `IDLE → LOCKED` (黄) | 锁定头部原点 |
+| 2 | 右手拇指+中指 捏一下 | `LOCKED → ARMED` (橙) | **第一次**,2 秒倒计时,防误触 |
+| 3 | 2 秒内再右捏一下 | `ARMED → ENGAGED` (绿) | **第二次确认**,开始 teleop **+ 数据采集自动开始** |
+| 4 | (做任务,头/手动)| `ENGAGED` 持续 | 录帧中 |
+| 5 | 右捏一下 | `ENGAGED → LOCKED` (黄) | **单次**即可暂停 + 数据采集自动停止 + 存盘 |
+| 6 | sh 脚本 sleep 3 秒后自动启下一条 |  |  |
+
+**特点**:
+- 中臂(mid)随头动,左右 puppet 跟人手动主臂,自动录入
+- HDF5 单文件每条 episode,在 `$DATASET_DIR/$TASK_NAME/episode_<i>.hdf5`
+- 录到的字段:joint state × 3 臂、EE pose(四元数 + RPY)× 3 臂、相机 × 3、master action × 3 臂
+- 状态机的 ARMED 中间步是防止误触发的安全门,如果 2 秒不二次确认会自动撤销回 LOCKED
+
+**手势检测的额外保护**:
+- pinch 距离用 Schmitt-trigger hysteresis(close < 0.03 m, open > 0.04 m)防抖
+- 当手出 AVP 视野 → 系统检测 landmarks 冻结 → 把 pinch 距离顶到 "open" 防误触发(HUD 上对应行显示红色 `(stale)`)
+- 详细见 `avp/avp_gesture_test.py` 里的 `GestureStateMachine` 和 `HandFreshness` 类
