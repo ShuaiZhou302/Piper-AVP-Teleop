@@ -1,3 +1,6 @@
 [submodule "piper_ros"]
 	path = piper_ros
 	url = https://github.com/agilexrobotics/piper_ros.git
+[submodule "gopro_as_webcam_on_linux"]
+	path = gopro_as_webcam_on_linux
+	url = https://github.com/jschmid1/gopro_as_webcam_on_linux.git

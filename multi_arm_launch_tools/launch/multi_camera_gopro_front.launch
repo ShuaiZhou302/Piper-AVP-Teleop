@@ -1,0 +1,60 @@
+<launch>
+    <!-- shuai 版: 左/右 Dabai + GoPro 替换前相机 (只有 color, 无 depth)
+         前提: start_gopro_front.sh 已经把 gopro 切到 webcam + ffmpeg 转流到 /dev/video42
+
+         发布 topic:
+           /camera_l/{color,depth,ir,...}/...    (Dabai 左, 同原版)
+           /camera_r/{color,depth,ir,...}/...    (Dabai 右, 同原版)
+           /camera_f/color/image_raw             (GoPro RGB, 替代原前 Dabai)
+           /camera_f/color/camera_info
+           /camera_f/color/image_raw/compressed  (image_transport 自动加)
+         注意: /camera_f/depth/* 没有 (GoPro 无深度)
+    -->
+
+    <arg name="camera_name" default="camera"/>
+    <arg name="3d_sensor" default="dabai"/>
+    <arg name="device_num" default="2"/>
+
+    <arg name="camera1_prefix" default="r"/>
+    <arg name="camera2_prefix" default="l"/>
+
+    <arg name="camera1_serila_number" default="CC1T35300D1"/>
+    <arg name="camera2_serila_number" default="CC1T353010Z"/>
+
+    <!-- 右相机 (Dabai) -->
+    <include file="$(find astra_camera)/launch/$(arg 3d_sensor).launch">
+        <arg name="camera_name" value="$(arg camera_name)_$(arg camera1_prefix)"/>
+        <arg name="serial_number" value="$(arg camera1_serila_number)"/>
+        <arg name="device_num" value="$(arg device_num)"/>
+    </include>
+
+    <!-- 左相机 (Dabai) -->
+    <include file="$(find astra_camera)/launch/$(arg 3d_sensor).launch">
+        <arg name="camera_name" value="$(arg camera_name)_$(arg camera2_prefix)"/>
+        <arg name="serial_number" value="$(arg camera2_serila_number)"/>
+        <arg name="device_num" value="$(arg device_num)"/>
+    </include>
+
+    <!-- 前相机 (GoPro via v4l2loopback /dev/video42) -->
+    <arg name="gopro_video_device" default="/dev/video42"/>
+    <arg name="gopro_width"        default="1920"/>
+    <arg name="gopro_height"       default="1080"/>
+    <arg name="gopro_framerate"    default="30"/>
+    <arg name="gopro_pixel_format" default="yuyv"/>
+
+    <group ns="camera_f">
+        <node name="gopro" pkg="usb_cam" type="usb_cam_node" output="screen">
+            <param name="video_device"  value="$(arg gopro_video_device)"/>
+            <param name="image_width"   value="$(arg gopro_width)"/>
+            <param name="image_height"  value="$(arg gopro_height)"/>
+            <param name="pixel_format"  value="$(arg gopro_pixel_format)"/>
+            <param name="io_method"     value="mmap"/>
+            <param name="framerate"     value="$(arg gopro_framerate)"/>
+            <param name="camera_name"   value="camera_f"/>
+            <!-- 把 usb_cam 默认的 image_raw / camera_info 改成 Dabai 风格的命名 -->
+            <remap from="image_raw"     to="color/image_raw"/>
+            <remap from="camera_info"   to="color/camera_info"/>
+        </node>
+    </group>
+
+</launch>
