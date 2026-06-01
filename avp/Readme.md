@@ -16,7 +16,7 @@ immersive session, and the PC reads 4×4 head and hand poses from Vuer's
                                                              └── .right_landmarks(25,3)
 ```
 
-Reference implementation: [../egox/data_collect/tele_vision.py](../egox/data_collect/tele_vision.py).
+Reference implementation: [tele_vision.py](tele_vision.py) (local copy from VisionProTeleop / egox).
 
 ---
 
@@ -28,8 +28,8 @@ conda activate avp
 pip install vuer==0.0.31rc7 aiohttp==3.9.5 aiohttp_cors==0.7.0 numpy
 ```
 
-Pin `vuer` to the version listed in egox's `requirements.txt`; newer releases
-changed the schema and the event payloads will not line up.
+Pin `vuer` to the version above; newer releases changed the schema and the
+event payloads will not line up.
 
 > **Python 3.8 compatibility (this machine's `aloha` env)**
 > A default install pulls in `params_proto-3.x`, which uses PEP 585 syntax
@@ -148,14 +148,14 @@ vr.right_landmarks    # (25,3) right hand 25 keypoints
 vr.aspect             # AVP display aspect ratio (scalar)
 ```
 
-Property definitions: [tele_vision.py:180-202](../egox/data_collect/tele_vision.py#L180-L202).
+Property definitions: [tele_vision.py:180-202](tele_vision.py#L180-L202).
 
 ### 6.1 Coordinate frame
 - AVP / WebXR world frame: **y up**, origin = where the headset locks tracking
   on entering the immersive session.
 - Different from the IsaacGym / robot convention (z up, x forward) — needs an
-  axis remap. egox's remap lives in
-  [egox_data_collect.py:1454-1472](../egox/data_collect/egox_data_collect.py#L1454-L1472).
+  axis remap. The teleop controller does this via the `R_AVP_TO_PIPER` matrix
+  in [../teleop/eef_avp_control_singlearm.py](../teleop/eef_avp_control_singlearm.py).
 - Units: meters / radians.
 
 ### 6.2 "Pose relative to initial"
@@ -166,10 +166,9 @@ T0 = vr.head_matrix.copy()
 # every subsequent frame:
 T_rel = np.linalg.inv(T0) @ vr.head_matrix
 ```
-egox does this more carefully: it takes only the head's yaw at reset, rotates
-the world frame about z so "operator forward = +x", and uses the reset-frame
-head position as the origin for subsequent deltas. See
-[egox_data_collect.py:1579-1637](../egox/data_collect/egox_data_collect.py#L1579-L1637).
+A more elaborate variant takes only the head's yaw at reset, rotates the world
+frame about z so "operator forward = +x", and uses the reset-frame head
+position as the origin for subsequent deltas. Not currently implemented here.
 
 ---
 
@@ -197,8 +196,9 @@ head position as the origin for subsequent deltas. See
   (just opening the page isn't enough). Tap Enter VR.
 - **`left_hand` sometimes jumps to a strange pose**: WebXR hand tracking falls
   back to the previous frame or returns garbage when the hand leaves the FOV.
-  egox's `safe_mat_update` reuses the previous frame in that case. See
-  [egox_data_collect.py:1421-1444](../egox/data_collect/egox_data_collect.py#L1421-L1444).
+  Our pinch detector handles this via `HandFreshness` in
+  [avp_gesture_test.py](avp_gesture_test.py) — when landmarks freeze for
+  ~333 ms it overrides pinch distance to "open" so the FSM doesn't false-trigger.
 - **PC's IP changed and AVP can't connect**: certificate is bound to the IP you
   signed it with — re-run `mkcert -cert-file ... <new IP> ...` and restart the
   server.
@@ -206,7 +206,7 @@ head position as the origin for subsequent deltas. See
   router/segment, kill any heavy traffic in the area.
 - **Can't see the real world**: Vuer runs in VR mode, not pass-through. You can
   push a camera feed into the Vuer scene background — see the `ImageBackground`
-  usage in [tele_vision.py:88-171](../egox/data_collect/tele_vision.py#L88-L171)
+  usage in [tele_vision.py:88-171](tele_vision.py#L88-L171)
   — but you won't see your actual room.
 
 ---
@@ -233,5 +233,5 @@ The same conventions apply to `left_hand` / `right_hand` orientations, which
 are reported in the same AVP world frame.
 
 To use these poses for a robot whose world is z-up / x-forward (IsaacGym, most
-arm controllers), apply the axis remap from
-[egox_data_collect.py:1454-1472](../egox/data_collect/egox_data_collect.py#L1454-L1472).
+arm controllers), apply the `R_AVP_TO_PIPER` axis remap in
+[../teleop/eef_avp_control_singlearm.py](../teleop/eef_avp_control_singlearm.py).

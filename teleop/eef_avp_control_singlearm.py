@@ -17,7 +17,7 @@ Run:
 # Boot ramp drives joint angles directly to these values; the corresponding
 # EE pose is derived from FK at runtime and used as the teleop reset anchor.
 # Same Piper hardware on all three arms -> same "ready" joint config works.
-INITIAL_ARM_JOINTS = (0.0000, 0.5652, -0.8781, -0.0086, 0.4596, 0.0292)
+INITIAL_ARM_JOINTS = (0.0463, 0.5300, -0.5562, 0.000, 0.2419, 0.0000)
 INITIAL_GRIPPER = 0.1
 
 import argparse

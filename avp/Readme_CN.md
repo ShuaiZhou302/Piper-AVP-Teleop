@@ -15,7 +15,7 @@ PC 端通过 Vuer 的 `HAND_MOVE` / `CAMERA_MOVE` 事件拿到头戴和双手的
                                                               └── .right_landmarks(25,3)
 ```
 
-参考实现:[../egox/data_collect/tele_vision.py](../egox/data_collect/tele_vision.py)。
+参考实现:[tele_vision.py](tele_vision.py)(本地副本,源自 VisionProTeleop / egox)。
 
 ---
 
@@ -27,7 +27,7 @@ conda activate avp
 pip install vuer==0.0.31rc7 aiohttp==3.9.5 aiohttp_cors==0.7.0 numpy
 ```
 
-`vuer` 版本要按 egox `requirements.txt` 锁定,新版本 schema 改过,事件结构会对不上。
+`vuer` 版本要按上面那个锁定,新版本 schema 改过,事件结构会对不上。
 
 > **Python 3.8 兼容(本机 aloha env 走的路线)**
 > 默认安装会拉到 `params_proto-3.x`,3.x 用了 PEP 585 的 `tuple[Any, bool]`,3.8 上 import 直接炸。
@@ -132,12 +132,13 @@ vr.right_landmarks    # (25,3) 右手 25 个关键点
 vr.aspect             # AVP 视场宽高比(标量)
 ```
 
-字段定义见 [tele_vision.py:180-202](../egox/data_collect/tele_vision.py#L180-L202)。
+字段定义见 [tele_vision.py:180-202](tele_vision.py#L180-L202)。
 
 ### 6.1 坐标系
 - AVP / WebXR 世界系:**y 朝上**,原点 = 戴头显完成空间定位时锁定的位置。
 - 与 IsaacGym / 实机常用的 **z 朝上 / x 前**不同,需要做轴重排。
-  egox 里的换轴见 [egox_data_collect.py:1454-1472](../egox/data_collect/egox_data_collect.py#L1454-L1472)。
+  teleop 脚本里的 `R_AVP_TO_PIPER` 矩阵就是干这个的,见
+  [../teleop/eef_avp_control_singlearm.py](../teleop/eef_avp_control_singlearm.py)。
 - 单位:米 / 弧度。
 
 ### 6.2 "相对初始位姿"
@@ -147,7 +148,7 @@ T0 = vr.head_matrix.copy()
 # 之后每帧:
 T_rel = np.linalg.inv(T0) @ vr.head_matrix
 ```
-egox 的精细做法:只用 reset 时刻 head 的 yaw 把世界系绕 z 转成"人脸朝向 = +x",再以 reset 时 head 位置作为原点做减法,见 [egox_data_collect.py:1579-1637](../egox/data_collect/egox_data_collect.py#L1579-L1637)。
+更精细的做法:只用 reset 时刻 head 的 yaw 把世界系绕 z 转成"人脸朝向 = +x",再以 reset 时 head 位置作为原点做减法。当前未实现这个变体。
 
 ---
 
@@ -165,10 +166,10 @@ egox 的精细做法:只用 reset 时刻 head 的 yaw 把世界系绕 z 转成"�
 - **Safari 一直提示证书不安全 / 进不去**:`mkcert -CAROOT` 那个根 CA 没装到 AVP,或者装了没在 Certificate Trust Settings 里"完全信任"。
 - **页面打开但没有 "Enter VR" 按钮**:WebXR feature flag 没开(第 4 节),或者 Safari 没重启。
 - **进了 VR 但 `head_matrix` 全是 0 / 单位阵**:Safari WebXR 没真正发事件,常见原因是没进 immersive(只是打开网页)。一定要点 Enter VR。
-- **`left_hand` 偶尔跳变到奇怪姿态**:WebXR hand tracking 在手出视野时会回退到上一帧或乱跳,egox 用 `safe_mat_update` 拿上一帧顶替,见 [egox_data_collect.py:1421-1444](../egox/data_collect/egox_data_collect.py#L1421-L1444)。
+- **`left_hand` 偶尔跳变到奇怪姿态**:WebXR hand tracking 在手出视野时会回退到上一帧或乱跳。我们的 pinch 检测用 [avp_gesture_test.py](avp_gesture_test.py) 里的 `HandFreshness` 处理 —— 当 landmarks 冻结约 333 ms 时把 pinch 距离强制顶到 "open",状态机不会误触发。
 - **PC 换 IP 后连不上**:证书绑死 IP,要重新 `mkcert -cert-file ... <新IP> ...` 并重启服务。
 - **延迟大 / 卡顿**:Wi-Fi 走 5G 频段、PC 和 AVP 同一路由器同段,关掉其他大流量设备。
-- **看不到外部世界**:Vuer 是 VR 模式,不是 pass-through。你能在 PC 端把摄像头画面 push 进 Vuer 场景作为背景(参考 [tele_vision.py:88-171](../egox/data_collect/tele_vision.py#L88-L171) 的 `ImageBackground` 用法),但看不到自己房间的真实画面。
+- **看不到外部世界**:Vuer 是 VR 模式,不是 pass-through。你能在 PC 端把摄像头画面 push 进 Vuer 场景作为背景(参考 [tele_vision.py:88-171](tele_vision.py#L88-L171) 的 `ImageBackground` 用法),但看不到自己房间的真实画面。
 
 ---
 
@@ -192,4 +193,4 @@ egox 的精细做法:只用 reset 时刻 head 的 yaw 把世界系绕 z 转成"�
 `left_hand` / `right_hand` 的姿态在同一个 AVP 世界系下,符号约定一致。
 
 要把这些位姿喂给 z-up / x-forward 的机器人世界系(IsaacGym、大多数机械臂控制器),
-用 [egox_data_collect.py:1454-1472](../egox/data_collect/egox_data_collect.py#L1454-L1472) 那段轴重排即可。
+用 [../teleop/eef_avp_control_singlearm.py](../teleop/eef_avp_control_singlearm.py) 里的 `R_AVP_TO_PIPER` 矩阵即可。
