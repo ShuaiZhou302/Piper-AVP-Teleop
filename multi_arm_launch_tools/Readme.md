@@ -136,20 +136,22 @@ bash collect_data_3arm.sh
 
 戴 AVP,Safari 进 immersive,按下面**每条 episode 重复**:
 
+触发手势统一改成**双手同时捏**(左右手各自拇指+中指一起捏),单手动作不会触发任何状态切换 —— 这样 teleop 时单手做夹爪/抓取动作就不会误触发暂停。
+
 | 步骤 | 手势 | HUD 状态 | 含义 |
 |---|---|---|---|
-| 1 | 左手拇指+中指 捏一下 | `IDLE → LOCKED` (黄) | 锁定头部原点 |
-| 2 | 右手拇指+中指 捏一下 | `LOCKED → ARMED` (橙) | **第一次**,2 秒倒计时,防误触 |
-| 3 | 2 秒内再右捏一下 | `ARMED → ENGAGED` (绿) | **第二次确认**,开始 teleop **+ 数据采集自动开始** |
-| 4 | (做任务,头/手动)| `ENGAGED` 持续 | 录帧中 |
-| 5 | 右捏一下 | `ENGAGED → LOCKED` (黄) | **单次**即可暂停 + 数据采集自动停止 + 存盘 |
-| 6 | sh 脚本 sleep 3 秒后自动启下一条 |  |  |
+| 1 | **双手** 拇指+中指 同时捏一下 | `IDLE → ENGAGED` (绿) | 锁定头部原点,开始 teleop **+ 数据采集自动开始** |
+| 2 | (做任务,头/手动)| `ENGAGED` 持续 | 录帧中 |
+| 3 | **双手** 同时捏一下 | `ENGAGED → DISARMED` (橙) | 进入暂停待确认,启动 4 秒长按计时 |
+| 4a | 保持双手捏住满 4 秒 | `DISARMED → IDLE` (灰) | 确认暂停 + 数据采集自动停止 + 存盘 |
+| 4b | 4 秒内任一手松开 | `DISARMED → ENGAGED` (绿) | 误触撤销,继续 teleop(帧不丢) |
+| 5 | sh 脚本 sleep 3 秒后自动启下一条 |  |  |
 
 **特点**:
 - 中臂(mid)随头动,左右 puppet 跟人手动主臂,自动录入
 - HDF5 单文件每条 episode,在 `$DATASET_DIR/$TASK_NAME/episode_<i>.hdf5`
 - 录到的字段:joint state × 3 臂、EE pose(四元数 + RPY)× 3 臂、相机 × 3、master action × 3 臂
-- 状态机的 ARMED 中间步是防止误触发的安全门,如果 2 秒不二次确认会自动撤销回 LOCKED
+- 暂停用"双手捏 + 按住 4 秒"两道门:双手捏避免单手夹爪动作误触,4 秒长按防止两手在 teleop 中偶然靠近被读成双手捏
 
 **手势检测的额外保护**:
 - pinch 距离用 Schmitt-trigger hysteresis(close < 0.03 m, open > 0.04 m)防抖

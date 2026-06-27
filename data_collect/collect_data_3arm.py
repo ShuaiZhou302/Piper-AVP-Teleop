@@ -10,7 +10,7 @@ Differences vs collect_data_shuai.py (cobot_magic/collect_data):
   * Episode lifecycle is driven by /teleop/state (published by
     eef_avp_control_singlearm.py), NOT keyboard input:
        wait until state == ENGAGED  -> start recording
-       on ENGAGED -> LOCKED          -> stop, save, exit
+       on ENGAGED -> IDLE           -> stop, save, exit
        on max_timesteps reached     -> stop, save, exit
   * task_name / task_description / dataset_dir come from CLI (set in .sh),
     no per-episode prompts.
@@ -25,6 +25,9 @@ HDF5 layout (action/observation 3-arm order: LEFT, RIGHT, MID):
     images/{cam_front,cam_left,cam_right} : (T, 480, 640, 3) uint8
   action                : (T, 21)   left master 7 + right 7 + mid 7
   base_action           : (T, 2)    (linear x, angular z), recorded for compatibility
+  camera_info/{cam_front,cam_left,cam_right} : static intrinsics (one copy, not per-frame)
+    K(9) intrinsic 3x3, D distortion, R(9) rectification, P(12) projection;
+    width/height/distortion_model as group attrs
 """
 import argparse
 import collections
@@ -41,7 +44,7 @@ import numpy as np
 import rospy
 from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import Image, JointState, CameraInfo
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from tf.transformations import euler_from_quaternion
@@ -55,7 +58,7 @@ EE_RPY_DIM = 6
 IMG_H, IMG_W = 480, 640
 
 
-def save_data(args, timesteps, actions, dataset_path):
+def save_data(args, timesteps, actions, dataset_path, cam_info=None):
     """Mirror layout of collect_data_shuai.py with 3-arm extensions."""
     data_size = len(actions)
     data_dict = {
@@ -117,6 +120,26 @@ def save_data(args, timesteps, actions, dataset_path):
 
         for name, array in data_dict.items():
             root[name][...] = array
+
+        # Camera intrinsics — one static copy per camera (NOT per-frame).
+        # K(9) = 3x3 intrinsic matrix, D = distortion coeffs, R(9) = rectification,
+        # P(12) = 3x4 projection. width/height/distortion_model as group attrs.
+        if cam_info:
+            ci_grp = root.create_group("camera_info")
+            for cam in CAM_ORDER:
+                msg = cam_info.get(cam)
+                if msg is None:
+                    print(f"\033[33m[collect] WARN: no CameraInfo for {cam}; "
+                          f"intrinsics not saved.\033[0m")
+                    continue
+                g = ci_grp.create_group(cam)
+                g.create_dataset("K", data=np.array(msg.K, dtype=float))
+                g.create_dataset("D", data=np.array(msg.D, dtype=float))
+                g.create_dataset("R", data=np.array(msg.R, dtype=float))
+                g.create_dataset("P", data=np.array(msg.P, dtype=float))
+                g.attrs["width"] = msg.width
+                g.attrs["height"] = msg.height
+                g.attrs["distortion_model"] = msg.distortion_model
     print(f"\033[32m\nSaving: {time.time() - t0:.1f} secs. {dataset_path}\033[0m\n")
 
 
@@ -133,6 +156,10 @@ class RosOperator:
         # Per-camera deques (color)
         self.img       = {c: deque() for c in CAM_ORDER}
         self.img_depth = {c: deque() for c in CAM_ORDER}
+
+        # Camera intrinsics (CameraInfo) — constant, so we only keep the latest
+        # message per camera and write a single copy into the HDF5, NOT per-frame.
+        self.cam_info  = {c: None for c in CAM_ORDER}
 
         self.base = deque()
         self.teleop_state = "IDLE"
@@ -192,6 +219,14 @@ class RosOperator:
                          lambda m: self._push(self.img["cam_right"], m),
                          queue_size=1000, tcp_nodelay=True)
 
+        # Camera intrinsics (one CameraInfo per color stream; constant, latest kept)
+        rospy.Subscriber(A.info_front_topic, CameraInfo,
+                         lambda m: self._set_info("cam_front", m), queue_size=1)
+        rospy.Subscriber(A.info_left_topic,  CameraInfo,
+                         lambda m: self._set_info("cam_left", m),  queue_size=1)
+        rospy.Subscriber(A.info_right_topic, CameraInfo,
+                         lambda m: self._set_info("cam_right", m), queue_size=1)
+
         # Base (for compat — may be all-zero if no base running)
         rospy.Subscriber(A.robot_base_topic, Odometry,
                          lambda m: self._push(self.base, m),
@@ -204,6 +239,10 @@ class RosOperator:
     def _state_cb(self, msg):
         self.teleop_state = msg.data
         self.teleop_state_stamp = time.monotonic()
+
+    def _set_info(self, cam, msg):
+        # Intrinsics are constant; just keep the most recent CameraInfo.
+        self.cam_info[cam] = msg
 
     # ------------- Frame sync -------------
     def get_frame(self):
@@ -313,9 +352,14 @@ class RosOperator:
         rate = rospy.Rate(self.args.frame_rate)
         sync_warned = False
 
+        # States during which we KEEP recording. DISARMED is the 4-second
+        # "pending pause" window (both hands held) — if the user releases
+        # early the FSM bounces back to ENGAGED and we keep the frames.
+        RECORDING_STATES = {"ENGAGED", "DISARMED"}
+
         while count < self.args.max_timesteps + 1 and not rospy.is_shutdown():
-            # Stop on ENGAGED -> non-ENGAGED transition.
-            if self.teleop_state != "ENGAGED":
+            # Stop on confirmed pause (IDLE) or any other non-recording state.
+            if self.teleop_state not in RECORDING_STATES:
                 print(
                     f"[collect] state -> {self.teleop_state} after {count} frames "
                     f"-> stop recording."
@@ -400,6 +444,11 @@ def get_arguments():
     p.add_argument("--img_left_topic",  type=str, default="/camera_l/color/image_raw")
     p.add_argument("--img_right_topic", type=str, default="/camera_r/color/image_raw")
 
+    # Camera intrinsics topics (CameraInfo; stored once, not per-frame)
+    p.add_argument("--info_front_topic", type=str, default="/camera_f/color/camera_info")
+    p.add_argument("--info_left_topic",  type=str, default="/camera_l/color/camera_info")
+    p.add_argument("--info_right_topic", type=str, default="/camera_r/color/camera_info")
+
     # Joint topics (puppet = arm state, master = command source / action)
     p.add_argument("--puppet_topic_left",  type=str, default="/puppet/joint_left")
     p.add_argument("--puppet_topic_right", type=str, default="/puppet/joint_right")
@@ -434,7 +483,7 @@ def main():
     if not os.path.exists(dataset_dir):
         os.makedirs(dataset_dir)
     dataset_path = os.path.join(dataset_dir, f"episode_{args.episode_idx}")
-    save_data(args, timesteps, actions, dataset_path)
+    save_data(args, timesteps, actions, dataset_path, op.cam_info)
 
 
 if __name__ == "__main__":

@@ -133,7 +133,7 @@ class AvpEefController:
         self.pub = rospy.Publisher(args.cmd_topic, JointState, queue_size=10)
 
         # Broadcast gesture state so collect_data_3arm.py can start/stop
-        # recording on ENGAGED / LOCKED transitions.
+        # recording on ENGAGED / IDLE transitions.
         self.state_pub = rospy.Publisher(TELEOP_STATE_TOPIC, String, queue_size=1)
 
         # IK
@@ -343,10 +343,13 @@ class AvpEefController:
             prev_state = self.fsm.state
             state = self.fsm.update(l_pinch, r_pinch)
 
-            if prev_state is State.IDLE and state is State.LOCKED:
+            # Lock the head origin only on the FIRST engage (IDLE->ENGAGED).
+            # Coming back from DISARMED (cancelled pause) must NOT re-anchor,
+            # or the arm would jump mid-teleop.
+            if prev_state is State.IDLE and state is State.ENGAGED:
                 self.head_pose_at_lock = self.vr.head_matrix.copy()
                 hp = self.head_pose_at_lock[:3, 3]
-                print(f"[teleop] LOCKED. head xyz={hp.round(3)}")
+                print(f"[teleop] ENGAGED. head origin xyz={hp.round(3)}")
 
             target_pos = None
             target_rpy = None
@@ -427,7 +430,8 @@ class AvpEefController:
             return
         print(f"[teleop] {self.arm} joint = {np.array(self.joint.position).round(3).tolist()}")
         self.boot_ramp_to_initial(duration=self.args.boot_duration)
-        print("[teleop] Pinch L thumb+middle to LOCK, then pinch R thumb+middle to ENGAGE.")
+        print("[teleop] Pinch BOTH hands (thumb+middle) to ENGAGE; pinch both again then "
+              "HOLD 4s to PAUSE.")
         self.main_loop()
 
 
