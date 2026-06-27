@@ -11,3 +11,6 @@ __pycache__/
 
 # Cloned by users at setup time, not part of the repo
 piper_ros/
+
+# External VLA repos (each has its own .git); kept locally, not part of this repo
+model/
