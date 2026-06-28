@@ -96,6 +96,7 @@ def save_data(args, timesteps, actions, dataset_path, cam_info=None):
         root.attrs["task_name"] = args.task_name
         root.attrs["task_description"] = args.task_description
         root.attrs["arm_order"] = ",".join(ARM_ORDER)
+        root.attrs["frame_rate"] = int(args.frame_rate)
 
         obs_grp = root.create_group("observations")
         images = obs_grp.create_group("images")

@@ -105,10 +105,17 @@ class OpenTeleVision:
                         quality=60,
                         key="left-image",
                         interpolate=True,
-                        aspect=1.778,
+                        # IMG_SHAPE is (480, 640) = 4:3 -> natural aspect 1.333,
+                        # but pure 4:3 makes the panel too tall for AVP FOV
+                        # (bottom-left / bottom-right corners are hard to see).
+                        # Bumping aspect to 1.6 compresses the height ~20% with
+                        # mild horizontal stretch -- a compromise between
+                        # 1.333 (too tall) and 1.778 (too wide, the original).
+                        aspect=1.6,
                         distanceToCamera=2,
-                        position=[0, -0.5, -2],
-                        rotation=[0, 0, 0],
+                        position=[0, 0, -2],   # raise panel to eye level so
+                        rotation=[0, 0, 0],    # the bottom edge is visible
+
                     ),
                     to="bgChildren",
                     )

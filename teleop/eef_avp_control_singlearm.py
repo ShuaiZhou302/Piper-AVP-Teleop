@@ -49,7 +49,10 @@ from tele_vision import OpenTeleVision  # noqa: E402
 import rospy  # noqa: E402
 from sensor_msgs.msg import JointState, Image as ImageMsg  # noqa: E402
 from std_msgs.msg import Header, String  # noqa: E402
-from tf.transformations import euler_matrix, euler_from_matrix  # noqa: E402
+from tf.transformations import (  # noqa: E402
+    euler_matrix, euler_from_matrix,
+    quaternion_from_matrix, quaternion_matrix, quaternion_slerp,
+)
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
 # Topic the gesture state is broadcast on (subscribed by collect_data_3arm.py).
@@ -125,10 +128,20 @@ class AvpEefController:
         # ROS
         rospy.init_node("eef_avp_teleop", anonymous=True)
         self.joint = None
-        self.latest_camera_frame = None  # numpy uint8 (H, W, 3) RGB
+        self.latest_camera_frame = None       # main / front camera (full background)
+        self.latest_left_aux_frame = None     # left-arm wrist camera (PIP bottom-left)
+        self.latest_right_aux_frame = None    # right-arm wrist camera (PIP bottom-right)
         rospy.Subscriber(args.joint_topic, JointState, self._joint_cb, queue_size=50)
         rospy.Subscriber(
             args.camera_topic, ImageMsg, self._camera_cb, queue_size=1, buff_size=2 ** 24
+        )
+        rospy.Subscriber(
+            args.left_aux_camera_topic, ImageMsg, self._left_aux_camera_cb,
+            queue_size=1, buff_size=2 ** 24,
+        )
+        rospy.Subscriber(
+            args.right_aux_camera_topic, ImageMsg, self._right_aux_camera_cb,
+            queue_size=1, buff_size=2 ** 24,
         )
         self.pub = rospy.Publisher(args.cmd_topic, JointState, queue_size=10)
 
@@ -146,6 +159,13 @@ class AvpEefController:
         self.head_pose_at_lock = None  # (4, 4) head pose in AVP world at lock time
         self.frame_idx = 0
         self.last_print = 0.0
+
+        # Head-pose EMA smoothing. alpha=1.0 -> no smoothing (raw, current feel);
+        # smaller alpha -> heavier low-pass (steadier but more lag). Position uses
+        # linear EMA, orientation uses slerp. State reset on each fresh engage.
+        self.smooth_alpha = float(args.smooth_alpha)
+        self._head_pos_s = None
+        self._head_R_s = None
 
         # Last commanded joint config. Once boot ramp finishes we keep publishing
         # this every frame; we DO NOT echo /puppet feedback, otherwise feedback
@@ -173,19 +193,36 @@ class AvpEefController:
     def _joint_cb(self, msg):
         self.joint = msg
 
-    def _camera_cb(self, msg):
+    @staticmethod
+    def _decode_image(msg, target_shape=None):
+        """ROS Image -> RGB numpy. Optional resize to (H, W). Returns None on bad encoding."""
         if msg.encoding == "rgb8":
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
         elif msg.encoding == "bgr8":
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)[:, :, ::-1]
         else:
-            return  # unsupported encoding
-        if (msg.height, msg.width) != IMG_SHAPE[:2]:
+            return None
+        if target_shape is not None and (msg.height, msg.width) != target_shape:
             arr = np.array(
-                Image.fromarray(arr).resize((IMG_SHAPE[1], IMG_SHAPE[0]), Image.BILINEAR)
+                Image.fromarray(arr).resize((target_shape[1], target_shape[0]), Image.BILINEAR)
             )
-        # Atomic reference swap; main thread reads via Image.fromarray which copies.
-        self.latest_camera_frame = arr
+        return arr
+
+    def _camera_cb(self, msg):
+        arr = self._decode_image(msg, target_shape=IMG_SHAPE[:2])
+        if arr is not None:
+            self.latest_camera_frame = arr
+
+    def _left_aux_camera_cb(self, msg):
+        # PIP gets resized at HUD draw time; keep native size here.
+        arr = self._decode_image(msg)
+        if arr is not None:
+            self.latest_left_aux_frame = arr
+
+    def _right_aux_camera_cb(self, msg):
+        arr = self._decode_image(msg)
+        if arr is not None:
+            self.latest_right_aux_frame = arr
 
     def wait_feedback(self, timeout_sec):
         deadline = rospy.Time.now() + rospy.Duration(timeout_sec)
@@ -246,6 +283,35 @@ class AvpEefController:
             f"rpy(deg)={np.rad2deg(fk_rpy).round(2).tolist()}"
         )
 
+    # ------------- Head-pose smoothing -------------
+    def reset_smoothing(self):
+        """Clear EMA state so the next smoothed frame re-seeds to the raw head."""
+        self._head_pos_s = None
+        self._head_R_s = None
+
+    def _smooth_head(self, head_now):
+        """Exponential low-pass on the raw head matrix. Returns a (4,4) matrix.
+        alpha=1.0 (or first frame) -> pass-through (no smoothing)."""
+        a = self.smooth_alpha
+        pos = head_now[:3, 3]
+        R = head_now[:3, :3]
+        if a >= 1.0 or self._head_pos_s is None:
+            self._head_pos_s = pos.copy()
+            self._head_R_s = R.copy()
+            return head_now
+        # Position: linear EMA toward the raw reading by alpha.
+        self._head_pos_s = a * pos + (1.0 - a) * self._head_pos_s
+        # Orientation: slerp from the smoothed quat toward the raw quat by alpha.
+        m_prev = np.eye(4); m_prev[:3, :3] = self._head_R_s
+        m_raw = np.eye(4);  m_raw[:3, :3] = R
+        q_s = quaternion_slerp(quaternion_from_matrix(m_prev),
+                               quaternion_from_matrix(m_raw), a)
+        self._head_R_s = quaternion_matrix(q_s)[:3, :3]
+        out = head_now.copy()
+        out[:3, 3] = self._head_pos_s
+        out[:3, :3] = self._head_R_s
+        return out
+
     # ------------- Pose math -------------
     def compute_target_pose(self, head_now):
         """World-frame composition: target = R_remap(delta_avp) * initial_arm_pose."""
@@ -286,6 +352,23 @@ class AvpEefController:
             y += 80 if fnt is self.font_big else 40
         self.img_view[:] = np.array(canvas)
 
+    # PIP sizing for left/right wrist cameras shown in HUD bottom corners.
+    PIP_W = 200
+    PIP_H = 150
+    PIP_MARGIN = 5
+
+    def _paste_pip(self, canvas, draw, frame, x_left):
+        """Resize a wrist-camera RGB frame and paste as PIP with green border."""
+        if frame is None:
+            return
+        y_top = IMG_SHAPE[0] - self.PIP_H - self.PIP_MARGIN
+        pip = Image.fromarray(frame).resize((self.PIP_W, self.PIP_H), Image.BILINEAR)
+        canvas.paste(pip, (x_left, y_top))
+        draw.rectangle(
+            [x_left - 1, y_top - 1, x_left + self.PIP_W, y_top + self.PIP_H],
+            outline=(80, 220, 100), width=2,
+        )
+
     def update_hud(self, state, target_pos=None, target_rpy=None, ik_msg=""):
         canvas = self._make_canvas()
         draw = ImageDraw.Draw(canvas)
@@ -298,27 +381,37 @@ class AvpEefController:
                 stroke_width=2, stroke_fill=(0, 0, 0),
             )
 
+        # --- top: state + hint
         centered(state.value, 10, self.font_big, STATE_COLOR[state])
         for k, line in enumerate(STATE_HINT[state]):
             centered(line, 80 + k * 32, self.font, (220, 220, 220))
 
+        # --- mid: target pose (moved up so it doesn't collide with PIP zone)
         if target_pos is not None and target_rpy is not None:
             centered(
                 f"x={target_pos[0]:+.3f} y={target_pos[1]:+.3f} z={target_pos[2]:+.3f}",
-                380, self.font, (255, 255, 255),
+                200, self.font, (255, 255, 255),
             )
             rpy_d = np.rad2deg(target_rpy)
             centered(
                 f"r={rpy_d[0]:+5.1f} p={rpy_d[1]:+5.1f} y={rpy_d[2]:+5.1f}",
-                415, self.font, (160, 220, 255),
+                232, self.font, (160, 220, 255),
             )
 
         if ik_msg:
-            centered(ik_msg, 200, self.font, (255, 90, 90))
+            centered(ik_msg, 270, self.font, (255, 90, 90))
+
+        # --- bottom: PIP wrist cameras (paste BEFORE frame# so text overlays)
+        self._paste_pip(canvas, draw, self.latest_left_aux_frame,
+                        x_left=self.PIP_MARGIN)
+        self._paste_pip(canvas, draw, self.latest_right_aux_frame,
+                        x_left=IMG_SHAPE[1] - self.PIP_W - self.PIP_MARGIN)
+
+        # frame# top-right corner (moved out of bottom so PIP has room)
         text = f"#{self.frame_idx}"
         w = draw.textlength(text, font=self.font)
         draw.text(
-            (IMG_SHAPE[1] - w - 8, IMG_SHAPE[0] - 32), text,
+            (IMG_SHAPE[1] - w - 8, 8), text,
             fill=(180, 180, 180), font=self.font,
             stroke_width=2, stroke_fill=(0, 0, 0),
         )
@@ -350,12 +443,30 @@ class AvpEefController:
                 self.head_pose_at_lock = self.vr.head_matrix.copy()
                 hp = self.head_pose_at_lock[:3, 3]
                 print(f"[teleop] ENGAGED. head origin xyz={hp.round(3)}")
+                self.reset_smoothing()  # re-seed EMA to current head, no startup lag
+
+            # Episode end: ENGAGED / DISARMED -> IDLE. Ramp arm back to
+            # INITIAL_ARM_JOINTS so the next episode starts from a clean,
+            # repeatable pose. Duration is derived from the largest joint
+            # distance / return_speed so the arm never moves faster than
+            # return_speed_rad_s regardless of how far it is from home.
+            if (
+                prev_state in (State.ENGAGED, State.DISARMED)
+                and state is State.IDLE
+            ):
+                current_q = np.asarray(self.joint.position[:6], dtype=float)
+                target_q = np.asarray(INITIAL_ARM_JOINTS, dtype=float)
+                max_delta = float(np.max(np.abs(target_q - current_q)))
+                duration = max(max_delta / self.args.return_speed_rad_s, 1.0)
+                print(f"[teleop] Episode ended -> ramping arm back to INITIAL "
+                      f"(max_delta={max_delta:.3f} rad, t={duration:.2f}s)")
+                self.boot_ramp_to_initial(duration=duration)
 
             target_pos = None
             target_rpy = None
 
             if state is State.ENGAGED and self.head_pose_at_lock is not None:
-                head_now = self.vr.head_matrix
+                head_now = self._smooth_head(self.vr.head_matrix)
                 target_pos, target_rpy = self.compute_target_pose(head_now)
                 # Seed IK with the last command, NOT the puppet feedback.
                 # Feedback lags command, so seeding with it can flip the IK
@@ -420,9 +531,12 @@ class AvpEefController:
         print(f"  joint_topic        = {self.args.joint_topic}")
         print(f"  cmd_topic          = {self.args.cmd_topic}")
         print(f"  camera_topic       = {self.args.camera_topic}")
+        print(f"  left_aux_camera    = {self.args.left_aux_camera_topic}  (HUD PIP)")
+        print(f"  right_aux_camera   = {self.args.right_aux_camera_topic}  (HUD PIP)")
         print(f"  INITIAL_ARM_JOINTS = {INITIAL_ARM_JOINTS}")
         print(f"  INITIAL_GRIPPER    = {INITIAL_GRIPPER}")
         print(f"  scale              = {self.scale}")
+        print(f"  smooth_alpha       = {self.smooth_alpha}  (1.0=raw, lower=smoother)")
         print("=" * 60)
         print("[teleop] Waiting for joint feedback (10s timeout)...")
         if not self.wait_feedback(10.0):
@@ -445,6 +559,10 @@ def get_args():
     p.add_argument("--cmd_topic",    type=str, default=None)
     p.add_argument("--camera_topic", type=str, default=None,
                    help="Color camera topic for the chosen arm; piped into the AVP HUD background.")
+    p.add_argument("--left_aux_camera_topic", type=str, default="/camera_l/color/image_raw",
+                   help="Left wrist camera topic for HUD PIP (bottom-left).")
+    p.add_argument("--right_aux_camera_topic", type=str, default="/camera_r/color/image_raw",
+                   help="Right wrist camera topic for HUD PIP (bottom-right).")
 
     default_urdf = (
         "/home/agilex/cobot_magic/Piper_ros_private-ros-noetic/src/piper_description/urdf/"
@@ -454,8 +572,18 @@ def get_args():
 
     p.add_argument("--scale", type=float, default=1.0,
                    help="Position-only scale factor: head delta * scale = EE delta.")
+    p.add_argument("--smooth_alpha", type=float, default=0.5,
+                   help="Head-pose EMA smoothing factor in (0, 1]. 1.0 = no smoothing "
+                        "(raw, jittery). Lower = steadier but more lag. Default 0.5 — "
+                        "moderate, ~48 ms lag at 30 Hz. Position uses linear EMA, "
+                        "orientation slerp.")
     p.add_argument("--boot_duration", type=float, default=3.0,
                    help="Seconds to ramp from current arm pose to INITIAL_ARM_JOINTS.")
+    p.add_argument("--return_speed_rad_s", type=float, default=0.3,
+                   help="Max joint speed (rad/s) when ramping arm back to "
+                        "INITIAL_ARM_JOINTS after each episode ends. "
+                        "Default 0.3 rad/s ~= 17 deg/s -- intentionally slow/safe; "
+                        "duration scales with the largest joint distance.")
     p.add_argument("--max_joint_step", type=float, default=0.05,
                    help="Max per-joint change per main-loop frame in rad. "
                         "0.05 rad/frame @ 30 Hz = 1.5 rad/s ~= 86 deg/s. Caps IK jumps.")
