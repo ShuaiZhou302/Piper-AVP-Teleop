@@ -350,6 +350,13 @@ class RosOperator:
         timesteps = []
         actions = []
         count = 0
+        # Track the count value of the LAST frame recorded while state was
+        # ENGAGED. After the loop we trim everything after this point so the
+        # trailing ~4 s of "both-hands held to confirm pause" never make it
+        # into the saved episode. Mid-episode DISARMED bounces (false-trigger
+        # that goes back to ENGAGED) are NOT trimmed because last_engaged_count
+        # advances every time we're in ENGAGED again.
+        last_engaged_count = 0
         rate = rospy.Rate(self.args.frame_rate)
         sync_warned = False
 
@@ -378,6 +385,8 @@ class RosOperator:
 
             img_msgs, pup_msgs, mst_msgs, ee_msgs, base_vel = frame
             count += 1
+            if self.teleop_state == "ENGAGED":
+                last_engaged_count = count
 
             # Images
             image_dict = {
@@ -427,7 +436,23 @@ class RosOperator:
                 print(f"[collect] frame {count} (state={self.teleop_state})")
             rate.sleep()
 
-        print(f"[collect] recorded {len(actions)} actions, {len(timesteps)} timesteps")
+        # Trim trailing frames that were recorded during DISARMED (i.e., the
+        # hand-hold window at the end of the episode). Keep up to and including
+        # the last ENGAGED frame.
+        #   timesteps layout: [FIRST(count=1), MID(count=2), ..., MID(count=N)]
+        #   actions   layout: [action(count=2), ...,           action(count=N)]
+        if last_engaged_count > 0 and last_engaged_count < count:
+            drop_ts = count - last_engaged_count
+            drop_act = drop_ts  # actions track MID timesteps 1:1 after the first FIRST
+            timesteps = timesteps[:last_engaged_count]
+            actions = actions[: max(0, last_engaged_count - 1)]
+            print(
+                f"[collect] trimmed trailing {drop_ts} DISARMED frames "
+                f"(hand-hold window); kept {len(actions)} actions, "
+                f"{len(timesteps)} timesteps"
+            )
+        else:
+            print(f"[collect] recorded {len(actions)} actions, {len(timesteps)} timesteps")
         return timesteps, actions
 
 

@@ -2,17 +2,14 @@
 """
 Gesture state machine test (Step A of AVP -> Piper teleop plan).
 
-Verifies pinch detection and IDLE / LOCKED / ENGAGED transitions in isolation,
+Verifies pinch detection and IDLE / ENGAGED / DISARMED transitions in isolation,
 before wiring the state machine into the actual arm controller.
 
 Gestures (all rising-edge with Schmitt-trigger hysteresis):
-  Left  thumb+middle pinch : IDLE    -> LOCKED
-  Right thumb+middle pinch : LOCKED  -> ARMED    (1st pinch = arm, safety)
-  Right thumb+middle pinch : ARMED   -> ENGAGED  (2nd pinch within timeout = confirm)
-  (timeout)                : ARMED   -> LOCKED   (no confirm -> auto-cancel)
-  Right thumb+middle pinch : ENGAGED -> LOCKED   (single pinch = pause/end)
-Two-pinch arm-then-confirm gate makes accidental engage much less likely;
-disengage is single-pinch on purpose so user can pause quickly.
+  Both thumb+middle pinch, held 2s : IDLE    -> ENGAGED
+  Both thumb+middle pinch          : ENGAGED -> DISARMED
+  Keep both held 4s                : DISARMED -> IDLE
+Holding 2s before ENGAGED avoids accidental episode starts.
 
 Run:
   conda activate aloha
@@ -55,6 +52,10 @@ class State(Enum):
     ENGAGED = "ENGAGED"
     DISARMED = "DISARMED"  # both-hand pinch from ENGAGED; HOLD to confirm pause
 
+
+# How long the operator must HOLD BOTH pinches closed (continuously) inside
+# IDLE to confirm starting teleop / recording. Released earlier -> stay IDLE.
+ENGAGE_HOLD_S = 2.0
 
 # How long the operator must HOLD BOTH pinches closed (continuously) inside
 # DISARMED to confirm pause. Released earlier -> bounce back to ENGAGED.
@@ -103,7 +104,7 @@ class GestureStateMachine:
     A single-hand pinch never triggers anything, so the natural one-hand
     gripper/manipulation motion during teleop won't false-trigger a pause.
 
-    IDLE     --[both-pinch rising edge]--------> ENGAGED   (lock head origin + record)
+    IDLE     --[both held ENGAGE_HOLD_S]-------> ENGAGED   (lock head origin + record)
     ENGAGED  --[both-pinch rising edge]--------> DISARMED  (start hold timer)
     DISARMED --[both held DISARM_HOLD_S]-------> IDLE      (long-hold confirms pause)
     DISARMED --[either hand released]----------> ENGAGED   (released early -> cancel)
@@ -114,12 +115,15 @@ class GestureStateMachine:
     avoiding accidental triggers if the program starts mid-pinch.
     """
 
-    def __init__(self, disarm_hold_s: float = DISARM_HOLD_S):
+    def __init__(self, engage_hold_s: float = ENGAGE_HOLD_S,
+                 disarm_hold_s: float = DISARM_HOLD_S):
         self.state = State.IDLE
         self._left_was_closed = True
         self._right_was_closed = True
         self._both_was_closed = True   # both-pinch combined edge tracker
+        self._engage_at = None         # IDLE start-hold timestamp
         self._disarm_at = 0.0          # DISARMED entry timestamp (hold-to-confirm start)
+        self.engage_hold_s = engage_hold_s
         self.disarm_hold_s = disarm_hold_s
 
     @staticmethod
@@ -144,12 +148,24 @@ class GestureStateMachine:
 
         if self.state is State.IDLE:
             if both_rising:
+                self._engage_at = now
+            elif not both_closed:
+                self._engage_at = None
+
+            if (
+                both_closed
+                and self._engage_at is not None
+                and (now - self._engage_at) >= self.engage_hold_s
+            ):
                 self.state = State.ENGAGED
+                self._engage_at = None
         elif self.state is State.ENGAGED:
+            self._engage_at = None
             if both_rising:
                 self.state = State.DISARMED
                 self._disarm_at = now
         elif self.state is State.DISARMED:
+            self._engage_at = None
             # Either hand released -> false trigger, bounce back to teleop.
             if not both_closed:
                 self.state = State.ENGAGED
@@ -172,7 +188,7 @@ STATE_COLOR = {
 }
 
 STATE_HINT = {
-    State.IDLE:     ["Pinch BOTH hands", "to ENGAGE"],
+    State.IDLE:     ["HOLD BOTH 2s", "to ENGAGE"],
     State.ENGAGED:  ["Pinch BOTH hands", "to start PAUSE"],
     State.DISARMED: ["HOLD BOTH 4s to PAUSE", "(release = cancel)"],
 }
