@@ -17,7 +17,7 @@ Run:
 # Boot ramp drives joint angles directly to these values; the corresponding
 # EE pose is derived from FK at runtime and used as the teleop reset anchor.
 # Same Piper hardware on all three arms -> same "ready" joint config works.
-INITIAL_ARM_JOINTS = (0.0463, 0.5300, -0.5562, 0.000, 0.2419, 0.0000)
+INITIAL_ARM_JOINTS = (0.0463, 0.5300, -0.5562, 0.000, 0.6500, 0.0000)
 INITIAL_GRIPPER = 0.1
 
 import argparse
@@ -386,20 +386,8 @@ class AvpEefController:
         for k, line in enumerate(STATE_HINT[state]):
             centered(line, 80 + k * 32, self.font, (220, 220, 220))
 
-        # --- mid: target pose (moved up so it doesn't collide with PIP zone)
-        if target_pos is not None and target_rpy is not None:
-            centered(
-                f"x={target_pos[0]:+.3f} y={target_pos[1]:+.3f} z={target_pos[2]:+.3f}",
-                200, self.font, (255, 255, 255),
-            )
-            rpy_d = np.rad2deg(target_rpy)
-            centered(
-                f"r={rpy_d[0]:+5.1f} p={rpy_d[1]:+5.1f} y={rpy_d[2]:+5.1f}",
-                232, self.font, (160, 220, 255),
-            )
-
         if ik_msg:
-            centered(ik_msg, 270, self.font, (255, 90, 90))
+            centered(ik_msg, 210, self.font, (255, 90, 90))
 
         # --- bottom: PIP wrist cameras (paste BEFORE frame# so text overlays)
         self._paste_pip(canvas, draw, self.latest_left_aux_frame,
@@ -544,8 +532,8 @@ class AvpEefController:
             return
         print(f"[teleop] {self.arm} joint = {np.array(self.joint.position).round(3).tolist()}")
         self.boot_ramp_to_initial(duration=self.args.boot_duration)
-        print("[teleop] Pinch BOTH hands (thumb+middle) to ENGAGE; pinch both again then "
-              "HOLD 4s to PAUSE.")
+        print("[teleop] HOLD BOTH hands pinched (thumb+middle) for 2s to ENGAGE; "
+              "pinch both again then HOLD 4s to PAUSE.")
         self.main_loop()
 
 

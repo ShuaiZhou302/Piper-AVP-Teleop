@@ -117,6 +117,14 @@ roslaunch ... start_ms_piper_3arm_collect.launch mid_auto_enable:=false
 然后**按下面顺序起 4 个终端**:
 
 ```bash
+# 每次开机/重启后必须做;脚本里以 USB bus-info 识别 4 个 CAN 模块
+# (左臂 / 右臂 / 中间臂 / 底盘)
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/
+bash multi_arm_launch_tools/can_config_shuai.sh
+source /home/agilex/cobot_magic/Piper_ros_private-ros-noetic/devel/setup.bash
+```
+
+```bash
 # 终端 1 — 启动 3 臂(左右 teach、中间 ROS 驱动)
 conda activate aloha
 roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/start_ms_piper_3arm_collect.launch
@@ -144,11 +152,11 @@ bash collect_data_3arm.sh
 
 戴 AVP,Safari 进 immersive,按下面**每条 episode 重复**:
 
-触发手势统一改成**双手同时捏**(左右手各自拇指+中指一起捏),单手动作不会触发任何状态切换 —— 这样 teleop 时单手做夹爪/抓取动作就不会误触发暂停。
+触发手势统一改成**双手同时捏**(左右手各自拇指+中指一起捏),开始需要保持 2 秒,单手动作不会触发任何状态切换 —— 这样 teleop 时单手做夹爪/抓取动作就不会误触发开始/暂停。
 
 | 步骤 | 手势 | HUD 状态 | 含义 |
 |---|---|---|---|
-| 1 | **双手** 拇指+中指 同时捏一下 | `IDLE → ENGAGED` (绿) | 锁定头部原点,开始 teleop **+ 数据采集自动开始** |
+| 1 | **双手** 拇指+中指 同时捏住满 2 秒 | `IDLE → ENGAGED` (绿) | 锁定头部原点,开始 teleop **+ 数据采集自动开始** |
 | 2 | (做任务,头/手动)| `ENGAGED` 持续 | 录帧中 |
 | 3 | **双手** 同时捏一下 | `ENGAGED → DISARMED` (橙) | 进入暂停待确认,启动 4 秒长按计时 |
 | 4a | 保持双手捏住满 4 秒 | `DISARMED → IDLE` (灰) | 确认暂停 + 数据采集自动停止 + 存盘 |
@@ -159,7 +167,7 @@ bash collect_data_3arm.sh
 - 中臂(mid)随头动,左右 puppet 跟人手动主臂,自动录入
 - HDF5 单文件每条 episode,在 `$DATASET_DIR/$TASK_NAME/episode_<i>.hdf5`
 - 录到的字段:joint state × 3 臂、EE pose(四元数 + RPY)× 3 臂、相机 × 3、master action × 3 臂
-- 暂停用"双手捏 + 按住 4 秒"两道门:双手捏避免单手夹爪动作误触,4 秒长按防止两手在 teleop 中偶然靠近被读成双手捏
+- 开始用"双手捏 + 按住 2 秒"防止误触开录;暂停用"双手捏 + 按住 4 秒"两道门:双手捏避免单手夹爪动作误触,4 秒长按防止两手在 teleop 中偶然靠近被读成双手捏
 
 **手势检测的额外保护**:
 - pinch 距离用 Schmitt-trigger hysteresis(close < 0.03 m, open > 0.04 m)防抖

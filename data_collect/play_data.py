@@ -35,7 +35,7 @@ from std_msgs.msg import Header
 
 # Must mirror teleop/eef_avp_control_singlearm.py:INITIAL_ARM_JOINTS.
 # Edit both together if you change one.
-INITIAL_ARM_JOINTS = (0.0463, 0.5300, -0.5562, 0.000, 0.2419, 0.0000)
+INITIAL_ARM_JOINTS = (0.0463, 0.5300, -0.5562, 0.000, 0.6500, 0.0000)
 INITIAL_GRIPPER = 0.1
 
 ARM_ORDER = ("left", "right", "mid")          # MUST match collect_data_3arm.py
