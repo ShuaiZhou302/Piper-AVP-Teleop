@@ -57,14 +57,29 @@ def find_hdf5_files(inputs):
 def _load_pose_helpers():
     from data_collect.collect_data_3arm import (  # noqa: WPS433
         _compute_camera_poses_in_unified,
+        _compute_eef_poses_in_unified,
+        write_camera_fov_attrs,
         write_camera_poses_in_unified,
+        write_eef_poses_in_unified,
     )
 
-    return _compute_camera_poses_in_unified, write_camera_poses_in_unified
+    return (
+        _compute_camera_poses_in_unified,
+        _compute_eef_poses_in_unified,
+        write_camera_fov_attrs,
+        write_camera_poses_in_unified,
+        write_eef_poses_in_unified,
+    )
 
 
 def postprocess_file(path, overwrite=True, dry_run=False):
-    compute_poses, write_poses = _load_pose_helpers()
+    (
+        compute_camera_poses,
+        compute_eef_poses,
+        write_fov_attrs,
+        write_camera_poses,
+        write_eef_poses,
+    ) = _load_pose_helpers()
     with h5py.File(path, "r" if dry_run else "r+") as root:
         if "observations/qpos" not in root:
             raise KeyError(f"{path}: missing observations/qpos")
@@ -72,20 +87,25 @@ def postprocess_file(path, overwrite=True, dry_run=False):
         if qpos.ndim != 2 or qpos.shape[1] < 21:
             raise ValueError(f"{path}: expected qpos shape (T, >=21), got {qpos.shape}")
 
-        cam_poses, summary = compute_poses(qpos)
+        cam_poses, camera_summary = compute_camera_poses(qpos)
         if cam_poses is None:
             raise RuntimeError(f"{path}: camera pose conversion unavailable")
+        eef_poses, eef_summary = compute_eef_poses(qpos)
+        if eef_poses is None:
+            raise RuntimeError(f"{path}: unified EEF pose conversion unavailable")
 
         if dry_run:
-            return qpos.shape[0], summary
+            return qpos.shape[0], camera_summary
 
-        write_poses(root, cam_poses, summary, overwrite=overwrite)
-        return qpos.shape[0], summary
+        write_camera_poses(root, cam_poses, camera_summary, overwrite=overwrite)
+        write_eef_poses(root, eef_poses, eef_summary, overwrite=overwrite)
+        write_fov_attrs(root)
+        return qpos.shape[0], camera_summary
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Post-process HDF5 episodes with camera_pose_in_unified."
+        description="Post-process HDF5 episodes with unified camera/EEF poses and FOV."
     )
     parser.add_argument("inputs", nargs="+", help="episode_*.hdf5 file(s) or directory")
     parser.add_argument(

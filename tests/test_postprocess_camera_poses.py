@@ -2,6 +2,9 @@ import os
 import tempfile
 import unittest
 
+import h5py
+import numpy as np
+
 from data_collect import postprocess_camera_poses as post
 
 
@@ -23,6 +26,41 @@ class PostprocessCameraPosesTest(unittest.TestCase):
             [os.path.basename(p) for p in found],
             ["episode_2.hdf5", "episode_10.hdf5"],
         )
+
+    def test_postprocess_writes_camera_eef_and_fov_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "episode_0.hdf5")
+            with h5py.File(path, "w") as f:
+                obs = f.create_group("observations")
+                obs.create_dataset("qpos", data=np.zeros((2, 21), dtype=float))
+                f.create_dataset("action", data=np.zeros((2, 21), dtype=float))
+                ci = f.create_group("camera_info")
+                for cam in ("cam_front", "cam_left", "cam_right"):
+                    g = ci.create_group(cam)
+                    g.create_dataset(
+                        "K",
+                        data=np.array([500.0, 0.0, 320.0, 0.0, 500.0, 240.0, 0.0, 0.0, 1.0]),
+                    )
+                    g.attrs["width"] = 640
+                    g.attrs["height"] = 480
+
+            frames, _summary = post.postprocess_file(path)
+
+            self.assertEqual(frames, 2)
+            with h5py.File(path, "r") as f:
+                self.assertEqual(
+                    f["observations/camera_pose_in_unified/cam_front/matrix"].shape,
+                    (2, 4, 4),
+                )
+                self.assertEqual(
+                    f["observations/ee_pose_in_unified/left/matrix"].shape,
+                    (2, 4, 4),
+                )
+                self.assertEqual(
+                    f["observations/ee_pose_in_unified"].attrs["eef_frame"],
+                    "teleop_ik_ee",
+                )
+                self.assertIn("horizontal_fov_rad", f["camera_info/cam_front"].attrs)
 
 
 if __name__ == "__main__":

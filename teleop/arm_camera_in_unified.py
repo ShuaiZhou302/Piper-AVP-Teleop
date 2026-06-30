@@ -20,17 +20,17 @@ import os
 import sys
 
 import numpy as np
-import pinocchio as pin
-from tf.transformations import quaternion_from_euler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+from piper_fk import (  # noqa: E402
+    DEFAULT_URDF, PiperFkModel, matrix_to_quat_xyz, matrix_to_rpy_xyz,
+)
 from arm_unified_coords import ARM_ORDER, ArmUnifiedConverter  # noqa: E402
 
 DEFAULT_CAL_DIR = os.path.join(HERE, "calibration_outputs")
-DEFAULT_URDF = os.path.join(HERE, "urdf", "piper_description.urdf")
 
 
 def find_latest_handeye(arm, cal_dir=DEFAULT_CAL_DIR):
@@ -84,67 +84,13 @@ class WristCameraUnifiedConverter:
             self.T_wrist_from_camera[arm] = X
             self.handeye_source[arm] = src
 
-        # Pinocchio FK only. Keep this independent of PinocchioIKSolver/CasADi
-        # so collect_data_3arm.py can post-process after rospy is already loaded.
-        self._pin = pin
-        self._robot, self._model, self._data = self._build_fk_model(urdf_path)
-        self._ee_frame_id = self._model.getFrameId("ee")
+        self.fk = PiperFkModel(urdf_path)
         self._urdf_path = urdf_path
-
-    def _package_dirs_for_urdf(self, urdf_path):
-        ap = os.path.abspath(urdf_path)
-        package_dirs = []
-        marker = os.sep + "piper_description" + os.sep
-        i = ap.find(marker)
-        if i >= 0:
-            package_dirs.append(ap[:i])
-        repo_piper_src = os.path.normpath(os.path.join(HERE, "..", "piper_ros", "src"))
-        if os.path.isdir(os.path.join(repo_piper_src, "piper_description", "meshes")):
-            package_dirs.append(repo_piper_src)
-        return package_dirs
-
-    def _build_fk_model(self, urdf_path):
-        pin = self._pin
-        robot = pin.RobotWrapper.BuildFromURDF(
-            urdf_path, package_dirs=self._package_dirs_for_urdf(urdf_path)
-        )
-        model = robot.buildReducedRobot(
-            list_of_joints_to_lock=["joint7", "joint8"],
-            reference_configuration=np.array([0.0] * robot.model.nq),
-        ).model
-
-        # Match teleop/eef_keyboard_control_singlearm.py exactly: the IK/control
-        # frame named "ee" is joint6 rotated by -90 deg around local Y.
-        ee_off_quat = quaternion_from_euler(0.0, -np.pi / 2.0, 0.0)
-        model.addFrame(
-            pin.Frame(
-                "ee",
-                model.getJointId("joint6"),
-                pin.SE3(
-                    pin.Quaternion(
-                        ee_off_quat[3], ee_off_quat[0],
-                        ee_off_quat[1], ee_off_quat[2],
-                    ),
-                    np.array([0.0, 0.0, 0.0]),
-                ),
-                pin.FrameType.OP_FRAME,
-            )
-        )
-        data = model.createData()
-        return robot, model, data
 
     # ---------- FK helper ----------
     def fk_base_from_wrist(self, joint_q6):
         """Forward-kinematics: 6-vector joint -> 4x4 T_base_from_wrist (ee frame)."""
-        q = np.asarray(joint_q6, dtype=float).flatten()
-        if q.size < 6:
-            raise ValueError(f"need 6 joints, got {q.size}")
-        self._pin.framesForwardKinematics(self._model, self._data, q[:6])
-        se3 = self._data.oMf[self._ee_frame_id]
-        T = np.eye(4)
-        T[:3, :3] = np.asarray(se3.rotation, dtype=float)
-        T[:3, 3] = np.asarray(se3.translation, dtype=float).flatten()
-        return T
+        return self.fk.base_from_ee(joint_q6)
 
     # ---------- Main API ----------
     def camera_pose_in_unified(self, arm, joint_q6):
@@ -176,24 +122,6 @@ class WristCameraUnifiedConverter:
             "handeye_per_arm": {arm: self.handeye_source[arm] for arm in ARM_ORDER},
         }
         return s
-
-
-# ---------------- HDF5 conversion helpers ----------------
-def matrix_to_quat_xyz(T):
-    """4x4 -> (x, y, z, qx, qy, qz, qw). Quaternion via tf.transformations."""
-    from tf.transformations import quaternion_from_matrix
-    q = quaternion_from_matrix(T)  # returns (x, y, z, w)
-    t = T[:3, 3]
-    return np.array([t[0], t[1], t[2], q[0], q[1], q[2], q[3]], dtype=float)
-
-
-def matrix_to_rpy_xyz(T):
-    """4x4 -> (x, y, z, roll, pitch, yaw)."""
-    from tf.transformations import euler_from_matrix
-    r, p, y = euler_from_matrix(T)
-    t = T[:3, 3]
-    return np.array([t[0], t[1], t[2], r, p, y], dtype=float)
-
 
 if __name__ == "__main__":
     # Smoke test: load + print summary + one FK at zero joints.

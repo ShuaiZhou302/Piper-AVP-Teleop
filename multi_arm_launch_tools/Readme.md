@@ -287,3 +287,39 @@ python data_collect/play_data_eef_ik.py /path/to/episode_0.hdf5 --respect_collis
 - 这是 EEF pose 经过 IK 后重新生成 joint command,不等同于原始 `action` 回放。
 - 首次真机跑建议低频或低速:比如 `--frame_rate 10`。
 - ramp 到第一帧前脚本会打印三臂当前 joint 和目标 joint,确认 workspace 清空后再回车。
+
+### Unified EEF Pose + IK 回放
+
+如果训练/后处理使用统一坐标系下的 EEF pose,先保证 HDF5 里有:
+
+```text
+observations/ee_pose_in_unified/{left,right,mid}/{matrix,quat,rpy}
+```
+
+旧数据可以补写:
+
+```bash
+python data_collect/postprocess_camera_poses.py /path/to/task_dir_or_episode.hdf5
+```
+
+然后 dry-run 检查 IK:
+
+```bash
+python data_collect/play_data_unified_eef_ik.py /path/to/episode_0.hdf5
+```
+
+真机回放:
+
+```bash
+python data_collect/play_data_unified_eef_ik.py /path/to/episode_0.hdf5 \
+    --execute \
+    --max_joint_step 0.05
+```
+
+这个脚本会把 `T_unified_from_ee` 先变回每个 arm base 下的 teleop IK `ee` frame:
+
+```text
+T_arm_from_ee = inv(T_unified_from_arm) @ T_unified_from_ee
+```
+
+再调用和 teleop/`play_data_eef_ik.py` 相同的 IK + ramp + joint step limit。gripper 仍然来自 `action` 里每个臂的第 7 维。
