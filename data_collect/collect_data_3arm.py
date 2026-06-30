@@ -41,6 +41,10 @@ import dm_env
 import h5py
 import numpy as np
 
+# IMPORTANT: import conda pinocchio before rospy/tf. rospy/tf can load the
+# system libstdc++; if that happens first, conda pinocchio/casadi may fail with
+# missing GLIBCXX_3.4.29 during camera-pose post-processing.
+import pinocchio as _pinocchio_libstdcpp_guard  # noqa: F401
 import rospy
 from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry
@@ -52,10 +56,98 @@ from tf.transformations import euler_from_quaternion
 
 ARM_ORDER = ("left", "right", "mid")  # canonical concatenation order
 CAM_ORDER = ("cam_front", "cam_left", "cam_right")
+# Which arm each camera is wrist-mounted on (mid arm carries the front cam).
+CAM_TO_ARM = {"cam_front": "mid", "cam_left": "left", "cam_right": "right"}
 DOF_PER_ARM = 7  # 6 joints + gripper
 EE_QUAT_DIM = 7
 EE_RPY_DIM = 6
 IMG_H, IMG_W = 480, 640
+
+
+def _compute_camera_poses_in_unified(qpos_array):
+    """Post-process step: per-frame camera pose in the unified arm frame.
+
+    Args:
+      qpos_array: (T, 21) float, layout = left[0:7] right[7:14] mid[14:21].
+
+    Returns:
+      (poses_per_cam, summary) where poses_per_cam maps cam_name -> dict with:
+        "quat":   (T, 7)  [x, y, z, qx, qy, qz, qw]
+        "rpy":    (T, 6)  [x, y, z, roll, pitch, yaw]
+        "matrix": (T, 4, 4)
+      summary is provenance info (calibration files used) for HDF5 attrs.
+
+      Returns (None, None) if calibration is missing — collection still
+      succeeds without the derived dataset.
+    """
+    # Import lazily so a missing calibration / pinocchio install doesn't break
+    # the data-collection process itself (we'd rather save without the derived
+    # field than abort the episode).
+    try:
+        teleop_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "teleop"
+        )
+        if teleop_dir not in sys.path:
+            sys.path.insert(0, teleop_dir)
+        from arm_camera_in_unified import (  # noqa: E402
+            WristCameraUnifiedConverter, matrix_to_quat_xyz, matrix_to_rpy_xyz,
+        )
+    except Exception as e:
+        print(f"\033[33m[postprocess] WARN: camera_pose_in_unified DISABLED "
+              f"(import failed: {e})\033[0m")
+        return None, None
+
+    try:
+        conv = WristCameraUnifiedConverter()
+    except Exception as e:
+        print(f"\033[33m[postprocess] WARN: camera_pose_in_unified DISABLED "
+              f"(converter init failed: {e})\033[0m")
+        return None, None
+
+    arr = np.asarray(qpos_array, dtype=float)
+    T = arr.shape[0]
+    # left=[0:7], right=[7:14], mid=[14:21] -> ARM_ORDER index map
+    arm_slice = {"left": slice(0, 7), "right": slice(7, 14), "mid": slice(14, 21)}
+
+    poses_per_cam = {}
+    for cam, arm in CAM_TO_ARM.items():
+        joint_arm = arr[:, arm_slice[arm]]  # (T, 7), only first 6 used by FK
+        Ts = conv.camera_poses_in_unified_batch(arm, joint_arm)  # (T, 4, 4)
+        quats = np.empty((T, 7), dtype=float)
+        rpys = np.empty((T, 6), dtype=float)
+        for t in range(T):
+            quats[t] = matrix_to_quat_xyz(Ts[t])
+            rpys[t] = matrix_to_rpy_xyz(Ts[t])
+        poses_per_cam[cam] = {"quat": quats, "rpy": rpys, "matrix": Ts}
+
+    summary = conv.summary()
+    return poses_per_cam, summary
+
+
+def write_camera_poses_in_unified(root, cam_poses, cam_pose_summary, overwrite=True):
+    """Write observations/camera_pose_in_unified into an open HDF5 root."""
+    obs_grp = root["observations"]
+    group_name = "camera_pose_in_unified"
+    if group_name in obs_grp:
+        if not overwrite:
+            raise RuntimeError(f"observations/{group_name} already exists")
+        del obs_grp[group_name]
+
+    cp_grp = obs_grp.create_group(group_name)
+    cp_grp.attrs["frame"] = "unified (mid_base orientation, origin 25cm below mid_base z)"
+    if cam_pose_summary:
+        cp_grp.attrs["extrinsics_json"] = cam_pose_summary["extrinsics_json"]
+        cp_grp.attrs["urdf"] = cam_pose_summary["urdf"]
+        cp_grp.attrs["unified_origin_in_mid_m"] = \
+            np.asarray(cam_pose_summary["unified_origin_in_mid_m"])
+        for arm, src in cam_pose_summary["handeye_per_arm"].items():
+            cp_grp.attrs[f"handeye_{arm}"] = src
+    for cam in CAM_ORDER:
+        g = cp_grp.create_group(cam)
+        g.attrs["wrist_arm"] = CAM_TO_ARM[cam]
+        g.create_dataset("quat",   data=cam_poses[cam]["quat"])
+        g.create_dataset("rpy",    data=cam_poses[cam]["rpy"])
+        g.create_dataset("matrix", data=cam_poses[cam]["matrix"])
 
 
 def save_data(args, timesteps, actions, dataset_path, cam_info=None):
@@ -88,6 +180,12 @@ def save_data(args, timesteps, actions, dataset_path, cam_info=None):
         for arm in ARM_ORDER:
             data_dict[f"/observations/ee_pose_quat/{arm}"].append(obs["ee_pose_quat"][arm])
             data_dict[f"/observations/ee_pose_rpy/{arm}"].append(obs["ee_pose_rpy"][arm])
+
+    # ---- POST-PROCESS: per-frame camera pose in unified arm frame ----
+    # Done AFTER collection (so the real-time teleop loop isn't perturbed)
+    # but BEFORE HDF5 write so derived poses live in the same file.
+    qpos_array = np.asarray(data_dict["/observations/qpos"], dtype=float)
+    cam_poses, cam_pose_summary = _compute_camera_poses_in_unified(qpos_array)
 
     t0 = time.time()
     with h5py.File(dataset_path + ".hdf5", "w", rdcc_nbytes=1024 ** 2 * 2) as root:
@@ -141,6 +239,12 @@ def save_data(args, timesteps, actions, dataset_path, cam_info=None):
                 g.attrs["width"] = msg.width
                 g.attrs["height"] = msg.height
                 g.attrs["distortion_model"] = msg.distortion_model
+
+        # Camera pose in unified arm frame (post-processed, per-frame).
+        # Layout: observations/camera_pose_in_unified/<cam>/{quat,rpy,matrix}
+        # quat = (x,y,z,qx,qy,qz,qw), rpy = (x,y,z,r,p,y), matrix = 4x4 SE(3).
+        if cam_poses is not None:
+            write_camera_poses_in_unified(root, cam_poses, cam_pose_summary, overwrite=False)
     print(f"\033[32m\nSaving: {time.time() - t0:.1f} secs. {dataset_path}\033[0m\n")
 
 

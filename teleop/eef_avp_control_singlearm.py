@@ -464,7 +464,8 @@ class AvpEefController:
                     list(self.joint.position[:6]) if self.joint else None
                 )
                 sol, ok, ik_msg_now = self.ik.solve(
-                    target_pos, target_rpy, gripper=INITIAL_GRIPPER, motorstate=seed
+                    target_pos, target_rpy, gripper=INITIAL_GRIPPER, motorstate=seed,
+                    allow_collision=not self.args.respect_collision,
                 )
                 if ok:
                     # Per-joint step limit: clip IK output to +/- max_joint_step
@@ -525,6 +526,7 @@ class AvpEefController:
         print(f"  INITIAL_GRIPPER    = {INITIAL_GRIPPER}")
         print(f"  scale              = {self.scale}")
         print(f"  smooth_alpha       = {self.smooth_alpha}  (1.0=raw, lower=smoother)")
+        print(f"  allow_collision    = {not self.args.respect_collision}")
         print("=" * 60)
         print("[teleop] Waiting for joint feedback (10s timeout)...")
         if not self.wait_feedback(10.0):
@@ -575,6 +577,10 @@ def get_args():
     p.add_argument("--max_joint_step", type=float, default=0.05,
                    help="Max per-joint change per main-loop frame in rad. "
                         "0.05 rad/frame @ 30 Hz = 1.5 rad/s ~= 86 deg/s. Caps IK jumps.")
+    p.add_argument("--respect_collision", action="store_true",
+                   help="Reject IK solutions flagged as collision. Default is to ignore "
+                        "the collision flag because the current model can false-positive "
+                        "on real reachable Piper poses.")
 
     args = p.parse_args()
 
