@@ -58,6 +58,7 @@ def _load_pose_helpers():
     from data_collect.collect_data_3arm import (  # noqa: WPS433
         _compute_camera_poses_in_unified,
         _compute_eef_poses_in_unified,
+        annotate_raw_driver_ee_pose_groups,
         write_camera_fov_attrs,
         write_camera_poses_in_unified,
         write_eef_poses_in_unified,
@@ -66,6 +67,7 @@ def _load_pose_helpers():
     return (
         _compute_camera_poses_in_unified,
         _compute_eef_poses_in_unified,
+        annotate_raw_driver_ee_pose_groups,
         write_camera_fov_attrs,
         write_camera_poses_in_unified,
         write_eef_poses_in_unified,
@@ -76,6 +78,7 @@ def postprocess_file(path, overwrite=True, dry_run=False):
     (
         compute_camera_poses,
         compute_eef_poses,
+        annotate_raw_ee,
         write_fov_attrs,
         write_camera_poses,
         write_eef_poses,
@@ -100,6 +103,7 @@ def postprocess_file(path, overwrite=True, dry_run=False):
         write_camera_poses(root, cam_poses, camera_summary, overwrite=overwrite)
         write_eef_poses(root, eef_poses, eef_summary, overwrite=overwrite)
         write_fov_attrs(root)
+        annotate_raw_ee(root)
         return qpos.shape[0], camera_summary
 
 

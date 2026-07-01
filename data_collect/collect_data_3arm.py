@@ -255,6 +255,37 @@ def write_eef_poses_in_unified(root, eef_poses, eef_pose_summary, overwrite=True
         g.create_dataset("matrix", data=eef_poses[arm]["matrix"])
 
 
+def annotate_raw_driver_ee_pose_groups(root):
+    """Mark legacy driver EE pose groups as raw joint6-frame data."""
+    if "observations" not in root:
+        return
+    obs_grp = root["observations"]
+    warning = (
+        "Raw Piper driver /puppet/end_pose joint6 frame. Do not compare directly "
+        "with camera_pose_in_unified; use observations/ee_pose_in_unified for "
+        "camera/EEF alignment and VLA training targets."
+    )
+    for group_name, repr_name, aligned_name in (
+        ("ee_pose_quat", "xyz_qxyzw", "quat"),
+        ("ee_pose_rpy", "xyz_rpy", "rpy"),
+    ):
+        if group_name not in obs_grp:
+            continue
+        group = obs_grp[group_name]
+        group.attrs["frame"] = "raw_driver_joint6"
+        group.attrs["source"] = "/puppet/end_pose_<arm>"
+        group.attrs["representation"] = repr_name
+        group.attrs["warning"] = warning
+        group.attrs["preferred_aligned_group"] = "observations/ee_pose_in_unified"
+        for arm in ARM_ORDER:
+            if arm in group:
+                group[arm].attrs["frame"] = "raw_driver_joint6"
+                group[arm].attrs["source"] = "/puppet/end_pose_<arm>"
+                group[arm].attrs["preferred_aligned_dataset"] = (
+                    f"observations/ee_pose_in_unified/{arm}/{aligned_name}"
+                )
+
+
 def save_data(args, timesteps, actions, dataset_path, cam_info=None):
     """Mirror layout of collect_data_shuai.py with 3-arm extensions."""
     data_size = len(actions)
@@ -325,6 +356,8 @@ def save_data(args, timesteps, actions, dataset_path, cam_info=None):
 
         for name, array in data_dict.items():
             root[name][...] = array
+
+        annotate_raw_driver_ee_pose_groups(root)
 
         # Camera intrinsics — one static copy per camera (NOT per-frame).
         # K(9) = 3x3 intrinsic matrix, D = distortion coeffs, R(9) = rectification,

@@ -33,6 +33,11 @@ class PostprocessCameraPosesTest(unittest.TestCase):
             with h5py.File(path, "w") as f:
                 obs = f.create_group("observations")
                 obs.create_dataset("qpos", data=np.zeros((2, 21), dtype=float))
+                ee_q = obs.create_group("ee_pose_quat")
+                ee_r = obs.create_group("ee_pose_rpy")
+                for arm in ("left", "right", "mid"):
+                    ee_q.create_dataset(arm, data=np.zeros((2, 7), dtype=float))
+                    ee_r.create_dataset(arm, data=np.zeros((2, 6), dtype=float))
                 f.create_dataset("action", data=np.zeros((2, 21), dtype=float))
                 ci = f.create_group("camera_info")
                 for cam in ("cam_front", "cam_left", "cam_right"):
@@ -61,6 +66,18 @@ class PostprocessCameraPosesTest(unittest.TestCase):
                     "teleop_ik_ee",
                 )
                 self.assertIn("horizontal_fov_rad", f["camera_info/cam_front"].attrs)
+                self.assertEqual(
+                    f["observations/ee_pose_quat"].attrs["frame"],
+                    "raw_driver_joint6",
+                )
+                self.assertIn(
+                    "Do not compare directly",
+                    f["observations/ee_pose_quat"].attrs["warning"],
+                )
+                self.assertEqual(
+                    f["observations/ee_pose_quat/left"].attrs["preferred_aligned_dataset"],
+                    "observations/ee_pose_in_unified/left/quat",
+                )
 
 
 if __name__ == "__main__":
