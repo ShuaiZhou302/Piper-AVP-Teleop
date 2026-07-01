@@ -23,7 +23,7 @@ TASK_NAME=pick_things_from_backpack
 TASK_DESCRIPTION="Took a bottle out of the backpack and put it out on the table"
 
 FRAME_RATE=30
-EPISODES=3
+EPISODES=50
 MAX_TIMESTEPS=3600        # 2 min @ 30 Hz; gesture stop should kick in well before
 
 # ============ Auto-upload config ============

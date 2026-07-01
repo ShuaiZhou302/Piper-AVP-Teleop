@@ -143,12 +143,13 @@ class PinocchioIKSolver:
         except Exception:
             return None, None, False
 
-    def solve(self, xyz, rpy, gripper=0.0, motorstate=None):
+    def solve(self, xyz, rpy, gripper=0.0, motorstate=None, allow_collision=False):
         q = quaternion_from_euler(rpy[0], rpy[1], rpy[2])
         target = pin.SE3(pin.Quaternion(q[3], q[0], q[1], q[2]), np.array(xyz, dtype=float))
         sol_q, _, get_result = self.ik_fun(target.homogeneous, gripper=gripper, motorstate=motorstate)
-        if get_result and sol_q is not None:
-            return sol_q[:6], True, "ok"
+        if sol_q is not None and (get_result or allow_collision):
+            msg = "ok" if get_result else "ok_allow_collision"
+            return sol_q[:6], True, msg
         return None, False, "ik_failed_or_collision"
 
 

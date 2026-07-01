@@ -219,3 +219,107 @@ python play_data.py path/to/ep.hdf5 \
 - 桌面上的物体最好和录制时一致,不然胳膊会"穿过去"或者撞到
 - ramp 速度故意慢(0.3 rad/s ≈ 17°/s),距离越远耗时越长但永远不会超速
 - 首次回放新数据时建议手放急停旁边
+
+---
+
+## EEF Pose + IK 回放(验证 EE 轨迹)
+
+如果想检查 HDF5 里记录的三臂 `ee_pose` 轨迹能不能通过当前 IK/control stack 复现,用这个脚本:
+
+```bash
+conda activate aloha
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop
+
+# 默认 dry-run: 只离线跑 IK,不发机器人命令
+python data_collect/play_data_eef_ik.py /path/to/episode_0.hdf5
+```
+
+真机执行前同样要用 **inference 模式 launch**:
+
+```bash
+conda activate aloha
+roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/start_ms_piper_3arm.launch mode:=1 auto_enable:=true
+```
+
+然后执行:
+
+```bash
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop
+python data_collect/play_data_eef_ik.py /path/to/episode_0.hdf5 --execute
+```
+
+脚本做的事:
+
+| 数据 | 用法 |
+|---|---|
+| `observations/ee_pose_rpy/{left,right,mid}` | 作为三臂每帧 EEF 目标 |
+| `action[:, 6]` | left gripper |
+| `action[:, 13]` | right gripper |
+| `action[:, 20]` | mid gripper |
+
+注意:当前 HDF5 里的 `/puppet/end_pose_*` 是 driver 报的 **joint6 frame**,不是 teleop IK 内部的 `ee` frame。`play_data_eef_ik.py` 默认会先把 joint6 pose 转成 teleop IK 用的 `ee` frame,再调用和 teleop 相同的 `PinocchioIKSolver.solve(xyz, rpy, gripper, motorstate=last_cmd)`。
+
+常用参数:
+
+```bash
+python data_collect/play_data_eef_ik.py /path/to/episode_0.hdf5 \
+    --execute                 # 真的发布 /master/joint_<arm>
+    --max_joint_step 0.05     # 每帧每关节最大变化,默认 0.05 rad; 设 0 关闭限幅
+    --frame_rate 15           # 覆盖回放频率
+    --no_confirm              # 跳过回车确认(确认安全后再用)
+```
+
+默认会忽略 IK solver 的 collision flag,因为当前 collision model 会把一些真实可达姿态误判成 collision。需要严格检查时再加:
+
+```bash
+python data_collect/play_data_eef_ik.py /path/to/episode_0.hdf5 --respect_collision
+```
+
+建议流程:
+
+1. 先 dry-run 看 `ik_fail` 统计。
+2. 如果 left/right/mid 都是 0 fail,再 `--execute` 真机跑。
+3. 如果加了 `--respect_collision` 后某个臂 fail 很多,去掉它再试。如果去掉后 fail 变 0,说明多半是 collision checker 对真实示教姿态过保守,不是 HDF5 的 EEF pose 错。
+4. `--execute` 时脚本会先解出 episode 第一帧 EEF pose 对应的 joint command,慢速 ramp 到这个起点,再开始逐帧播放。
+
+安全注意:
+
+- 这是 EEF pose 经过 IK 后重新生成 joint command,不等同于原始 `action` 回放。
+- 首次真机跑建议低频或低速:比如 `--frame_rate 10`。
+- ramp 到第一帧前脚本会打印三臂当前 joint 和目标 joint,确认 workspace 清空后再回车。
+
+### Unified EEF Pose + IK 回放
+
+如果训练/后处理使用统一坐标系下的 EEF pose,先保证 HDF5 里有:
+
+```text
+observations/ee_pose_in_unified/{left,right,mid}/{matrix,quat,rpy}
+```
+
+旧数据可以补写:
+
+```bash
+python data_collect/postprocess_camera_poses.py /path/to/task_dir_or_episode.hdf5
+```
+
+然后 dry-run 检查 IK:
+
+```bash
+python data_collect/play_data_unified_eef_ik.py /path/to/episode_0.hdf5
+```
+
+真机回放:
+
+```bash
+python data_collect/play_data_unified_eef_ik.py /path/to/episode_0.hdf5 \
+    --execute \
+    --max_joint_step 0.05
+```
+
+这个脚本会把 `T_unified_from_ee` 先变回每个 arm base 下的 teleop IK `ee` frame:
+
+```text
+T_arm_from_ee = inv(T_unified_from_arm) @ T_unified_from_ee
+```
+
+再调用和 teleop/`play_data_eef_ik.py` 相同的 IK + ramp + joint step limit。gripper 仍然来自 `action` 里每个臂的第 7 维。
