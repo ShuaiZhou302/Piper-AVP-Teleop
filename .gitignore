@@ -14,3 +14,6 @@ piper_ros/
 
 # External VLA repos (each has its own .git); kept locally, not part of this repo
 model/
+
+# Local pulled HDF5 review caches
+data_collect/hpc3_*_review/
