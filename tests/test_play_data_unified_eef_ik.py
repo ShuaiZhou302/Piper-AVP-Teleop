@@ -26,6 +26,27 @@ class UnifiedEefPlaybackTest(unittest.TestCase):
         self.assertEqual(poses["left"].shape, (1, 6))
         np.testing.assert_allclose(poses["left"][0, :3], np.array([0.0, 2.0, 3.0]))
 
+    def test_quaternion_source_normalizes_and_makes_signs_continuous(self):
+        xyz_q = np.array([
+            [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 2.0],
+            [1.0, 2.0, 3.0, -0.0, -0.0, -0.0, -2.0],
+        ])
+
+        normalized = playback.normalize_quat_signs(xyz_q)
+
+        np.testing.assert_allclose(normalized[:, 3:7], np.array([
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]))
+
+    def test_quaternion_source_converts_to_matrix_pose(self):
+        xyz_q = np.array([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]])
+
+        matrices = playback.quat_xyz_to_matrices(xyz_q)
+        poses = playback.unified_matrices_to_arm_rpy_poses({"left": matrices}, FakeConverter())
+
+        np.testing.assert_allclose(poses["left"][0, :3], np.array([0.0, 2.0, 3.0]))
+
 
 if __name__ == "__main__":
     unittest.main()

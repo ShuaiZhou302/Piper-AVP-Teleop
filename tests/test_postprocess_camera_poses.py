@@ -65,6 +65,22 @@ class PostprocessCameraPosesTest(unittest.TestCase):
                     f["observations/ee_pose_in_unified"].attrs["eef_frame"],
                     "teleop_ik_ee",
                 )
+                self.assertEqual(
+                    f["observations/ee_pose_in_unified/left/quat"].attrs[
+                        "quaternion_order"
+                    ],
+                    "xyzw",
+                )
+                self.assertEqual(
+                    f["observations/ee_pose_in_unified/left/quat"].attrs["columns"],
+                    "x,y,z,qx,qy,qz,qw",
+                )
+                self.assertEqual(
+                    f["observations/camera_pose_in_unified/cam_front/quat"].attrs[
+                        "quaternion_order"
+                    ],
+                    "xyzw",
+                )
                 self.assertIn("horizontal_fov_rad", f["camera_info/cam_front"].attrs)
                 self.assertEqual(
                     f["observations/ee_pose_quat"].attrs["frame"],
@@ -77,6 +93,10 @@ class PostprocessCameraPosesTest(unittest.TestCase):
                 self.assertEqual(
                     f["observations/ee_pose_quat/left"].attrs["preferred_aligned_dataset"],
                     "observations/ee_pose_in_unified/left/quat",
+                )
+                self.assertEqual(
+                    f["observations/ee_pose_quat/left"].attrs["quaternion_order"],
+                    "xyzw",
                 )
 
 

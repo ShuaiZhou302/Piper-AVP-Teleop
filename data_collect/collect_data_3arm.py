@@ -225,9 +225,10 @@ def write_camera_poses_in_unified(root, cam_poses, cam_pose_summary, overwrite=T
     for cam in CAM_ORDER:
         g = cp_grp.create_group(cam)
         g.attrs["wrist_arm"] = CAM_TO_ARM[cam]
-        g.create_dataset("quat",   data=cam_poses[cam]["quat"])
-        g.create_dataset("rpy",    data=cam_poses[cam]["rpy"])
-        g.create_dataset("matrix", data=cam_poses[cam]["matrix"])
+        quat = g.create_dataset("quat", data=cam_poses[cam]["quat"])
+        rpy = g.create_dataset("rpy", data=cam_poses[cam]["rpy"])
+        matrix = g.create_dataset("matrix", data=cam_poses[cam]["matrix"])
+        annotate_pose_repr_datasets(quat=quat, rpy=rpy, matrix=matrix)
 
 
 def write_eef_poses_in_unified(root, eef_poses, eef_pose_summary, overwrite=True):
@@ -250,9 +251,29 @@ def write_eef_poses_in_unified(root, eef_poses, eef_pose_summary, overwrite=True
     for arm in ARM_ORDER:
         g = ee_grp.create_group(arm)
         g.attrs["source"] = "qpos_fk"
-        g.create_dataset("quat", data=eef_poses[arm]["quat"])
-        g.create_dataset("rpy", data=eef_poses[arm]["rpy"])
-        g.create_dataset("matrix", data=eef_poses[arm]["matrix"])
+        quat = g.create_dataset("quat", data=eef_poses[arm]["quat"])
+        rpy = g.create_dataset("rpy", data=eef_poses[arm]["rpy"])
+        matrix = g.create_dataset("matrix", data=eef_poses[arm]["matrix"])
+        annotate_pose_repr_datasets(quat=quat, rpy=rpy, matrix=matrix)
+
+
+def annotate_pose_repr_datasets(quat=None, rpy=None, matrix=None):
+    """Write explicit pose representation attrs for downstream loaders."""
+    if quat is not None:
+        quat.attrs["representation"] = "xyz_qxyzw"
+        quat.attrs["columns"] = "x,y,z,qx,qy,qz,qw"
+        quat.attrs["position_unit"] = "m"
+        quat.attrs["quaternion_order"] = "xyzw"
+        quat.attrs["quaternion_columns"] = "qx,qy,qz,qw"
+    if rpy is not None:
+        rpy.attrs["representation"] = "xyz_rpy"
+        rpy.attrs["columns"] = "x,y,z,roll,pitch,yaw"
+        rpy.attrs["position_unit"] = "m"
+        rpy.attrs["angle_unit"] = "rad"
+    if matrix is not None:
+        matrix.attrs["representation"] = "T_frame_from_pose"
+        matrix.attrs["shape_per_timestep"] = "4x4"
+        matrix.attrs["position_unit"] = "m"
 
 
 def annotate_raw_driver_ee_pose_groups(root):
@@ -284,6 +305,10 @@ def annotate_raw_driver_ee_pose_groups(root):
                 group[arm].attrs["preferred_aligned_dataset"] = (
                     f"observations/ee_pose_in_unified/{arm}/{aligned_name}"
                 )
+                if group_name == "ee_pose_quat":
+                    annotate_pose_repr_datasets(quat=group[arm])
+                elif group_name == "ee_pose_rpy":
+                    annotate_pose_repr_datasets(rpy=group[arm])
 
 
 def save_data(args, timesteps, actions, dataset_path, cam_info=None):
