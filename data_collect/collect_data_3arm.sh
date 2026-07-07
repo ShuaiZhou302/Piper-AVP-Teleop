@@ -19,20 +19,57 @@ set -e
 
 # ============ Local collection config ============
 DATASET_DIR=~/data_shuai_3arm
-TASK_NAME=pick_things_from_backpack
-TASK_DESCRIPTION="Took a bottle out of the backpack and put it out on the table"
+TASK_NAME=pick_things_from_shelft_and_put_in_the_box_v4
+TASK_DESCRIPTION="Open the bottom drawer on the right, take out the fruit inside, place it on the brown plate at the center of the tabletop, and then close the drawer"
 
 FRAME_RATE=30
-EPISODES=50
+EXPECTED_FRAME_RATE=30
+ALLOW_NON_30HZ="${ALLOW_NON_30HZ:-no}"
+EPISODES=3
 MAX_TIMESTEPS=3600        # 2 min @ 30 Hz; gesture stop should kick in well before
+
+# Episode-index ranges for language labels. Format: "START-END|description".
+# The first matching range is used; if nothing matches, TASK_DESCRIPTION is used.
+TASK_DESCRIPTION_RANGES=(
+    "0-1|Pick up the red box from the top shelf of the shelving unit on the left and place it on the blue box on the right."
+    "2-3|Pick up the brown bottle from the top shelf of the shelving unit on the left and place it on the blue box on the right."
+
+    )
+    # "0-14|Pick up the red box from the top shelf of the shelving unit on the left and place it on the blue box on the right."
+
+    # "15-29|Pick up the brown bottle from the top shelf of the shelving unit on the left and place it on the brown box on the left."
+    # "0-1|Pick up the red box from the top shelf of the shelving unit on the left and place it on the brown box on the left."
+    # "0-14|Pick up the yellow canister from the middle shelf of the shelving unit on the left and place it on the brown box on the left."
+
+    # "15-29|Pick up the yellow canister from the middle shelf of the shelving unit on the left and place it on the blue box on the right."
+    #  "0-14|Pick up the silver can from the bottom shelf of the shelving unit on the left and place it on the brown box on the left."
+
+    # "15-29|Pick up the silver can from the bottom shelf of the shelving unit on the left and place it on the blue box on the right."
+
+    # "30-44|Pick up the blue cookie box from the middle shelf of the shelving unit on the left and place it on the brown box on the left."
+
+    # "45-59|Pick up the blue cookie box from the middle shelf of the shelving unit on the left and place it on the blue box on the right."
+    # Pick up the green bell pepper from the left shelf, place it into the pot on the middle table, and then cover the pot with the lid.
+    # Pick up the onion from the left shelf, place it into the pot on the middle table, and then cover the pot with the lid.
+    # Pick up the yellow bell pepper from the left shelf, place it into the pot on the middle table, and then cover the pot with the lid.
+    # Pick up the red bell pepper from the left shelf, place it into the pot on the middle table, and then cover the pot with the lid.
+    # Pick up the white radish from the left shelf, place it into the pot on the middle table, and then cover the pot with the lid.
+    # "30-59|Pick up the carrot from underneath the table, and place it into its corresponding labeled bin."
+    # "60-89|Pick up the corn from underneath the table, and place it into its corresponding labeled bin."
+    # "0-19|Pick up the carrot from underneath the table and place it into the corresponding labeled bin. Then, pick up the corn from underneath the table and place it into the corresponding labeled bin."
+    # "20-39|Pick up the potato from underneath the table and place it into the corresponding labeled bin. Then, pick up the corn from underneath the table and place it into the corresponding labeled bin."
+    # "40-59|Pick up the potato from underneath the table and place it into the corresponding labeled bin. Then, pick up the carrot from underneath the table and place it into the corresponding labeled bin."
+    # "20-39|Pick up the potato from underneath the table, and place it into its corresponding labeled bin."
+    # "40-59|Pick up the carrot from underneath the table, and place it into its corresponding labeled bin."
+    # "60-79|Pick up the corn from underneath the table, and place it into its corresponding labeled bin."
 
 # ============ Auto-upload config ============
 # Set UPLOAD_AFTER_EPISODE=no to disable; the script then just keeps files locally.
-UPLOAD_AFTER_EPISODE=yes
+UPLOAD_AFTER_EPISODE=no
 WAIT_FOR_UPLOADS_AT_END=yes
 REMOTE_SSH=hpc3_haoangli
 REMOTE_SSH_FALLBACK=haoangli@10.120.48.26
-REMOTE_BASE=/data/user/haoangli/shuai/active_perception
+REMOTE_BASE=/data/user/haoangli/shuai/active_perception/cobot_teleop_finetune/
 REMOTE_TASK_DIR="${REMOTE_BASE}/${TASK_NAME}"
 # Faster for multi-GB new files on a LAN/HPC link: skip rsync delta checks,
 # keep partial files for resume, and avoid SSH compression CPU overhead.
@@ -45,10 +82,123 @@ LOSSLESS_UPLOAD_COMPRESSION="${LOSSLESS_UPLOAD_COMPRESSION:-auto}"
 REMOTE_UPLOAD_COMPRESSION=none
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIRM_TASK_DESCRIPTION="${CONFIRM_TASK_DESCRIPTION:-no}"
 UPLOAD_QUEUE_FIFO=""
 UPLOAD_WORKER_PID=""
 UPLOAD_QUEUE_FD=9
 REMOTE_EPISODE_NEXT=0
+
+trim_ws() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf "%s" "$s"
+}
+
+description_for_episode() {
+    local episode_idx="$1"
+    local entry
+    local range
+    local desc
+    local start
+    local end
+
+    for entry in "${TASK_DESCRIPTION_RANGES[@]}"; do
+        range="${entry%%|*}"
+        desc="${entry#*|}"
+        start="${range%-*}"
+        end="${range#*-}"
+        if [[ "$start" =~ ^[0-9]+$ ]] && [[ "$end" =~ ^[0-9]+$ ]] && \
+                (( episode_idx >= start && episode_idx <= end )); then
+            printf "%s" "$desc"
+            return
+        fi
+    done
+
+    printf "%s" "$TASK_DESCRIPTION"
+}
+
+description_range_contains_episode() {
+    local episode_idx="$1"
+    local entry
+    local range
+    local start
+    local end
+
+    for entry in "${TASK_DESCRIPTION_RANGES[@]}"; do
+        range="${entry%%|*}"
+        start="${range%-*}"
+        end="${range#*-}"
+        if [[ "$start" =~ ^[0-9]+$ ]] && [[ "$end" =~ ^[0-9]+$ ]] && \
+                (( episode_idx >= start && episode_idx <= end )); then
+            return 0
+        fi
+    done
+    return 1
+}
+
+validate_frame_rate() {
+    if [ "$FRAME_RATE" -eq "$EXPECTED_FRAME_RATE" ]; then
+        return
+    fi
+
+    echo "[collect] ERROR: FRAME_RATE=${FRAME_RATE}, expected ${EXPECTED_FRAME_RATE} Hz." >&2
+    echo "[collect] This changes dataset timing and HDF5 frame_rate metadata." >&2
+    echo "[collect] Fix FRAME_RATE=${EXPECTED_FRAME_RATE}, or explicitly run with ALLOW_NON_30HZ=yes if you truly want a non-30Hz dataset." >&2
+    if [ "$ALLOW_NON_30HZ" = "yes" ]; then
+        echo "[collect] WARNING: ALLOW_NON_30HZ=yes set; continuing with FRAME_RATE=${FRAME_RATE}." >&2
+        return
+    fi
+    exit 2
+}
+
+validate_description_ranges_for_run() {
+    local missing=()
+    local idx
+    local end_idx=$((EPISODES - 1))
+
+    for ((idx=0; idx<=end_idx; idx++)); do
+        if ! description_range_contains_episode "$idx"; then
+            missing+=("$idx")
+        fi
+    done
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        return
+    fi
+
+    echo "[collect] ERROR: TASK_DESCRIPTION_RANGES does not cover this run." >&2
+    echo "[collect] Planned local episode range: 0-${end_idx}" >&2
+    echo "[collect] Missing description ranges for episode(s): ${missing[*]}" >&2
+    echo "[collect] Fix TASK_DESCRIPTION_RANGES or EPISODES. Refusing to use TASK_DESCRIPTION fallback silently." >&2
+    exit 2
+}
+
+confirm_episode_description() {
+    local episode_idx="$1"
+    local desc="$2"
+    local replacement
+
+    if [ "$CONFIRM_TASK_DESCRIPTION" != "yes" ]; then
+        printf "%s" "$desc"
+        return
+    fi
+
+    if [ ! -t 0 ]; then
+        echo "[collect] episode ${episode_idx} description: ${desc}" >&2
+        printf "%s" "$desc"
+        return
+    fi
+
+    echo "[collect] episode ${episode_idx} description:" >&2
+    echo "  ${desc}" >&2
+    read -rp "[collect] Press ENTER to use, or type replacement: " replacement
+    replacement="$(trim_ws "$replacement")"
+    if [ -n "$replacement" ]; then
+        desc="$replacement"
+    fi
+    printf "%s" "$desc"
+}
 
 # ============ Init: validate upload setup once before first episode ============
 if [ "$UPLOAD_AFTER_EPISODE" = "yes" ]; then
@@ -204,18 +354,22 @@ upload_and_delete() {
     local remote_idx="$2"
     local remote_file="${REMOTE_TASK_DIR}/episode_${remote_idx}.hdf5"
     local base
+    local upload_status
     base="$(basename "$file")"
     echo "[upload] ${base} -> ${REMOTE_SSH}:${remote_file}"
+    set +e
     if [ "$REMOTE_UPLOAD_COMPRESSION" = "none" ]; then
         upload_raw_rsync "$file" "$remote_file"
     else
         upload_lossless_stream "$file" "$remote_file"
     fi
-    if [ "$?" -eq 0 ]; then
+    upload_status=$?
+    set -e
+    if [ "$upload_status" -eq 0 ]; then
         echo "[upload] success, removing local ${file}"
         rm -f "$file"
     else
-        echo "[upload] FAILED for ${file}. Keeping local file; will NOT retry automatically."
+        echo "[upload] FAILED for ${file} (status=${upload_status}). Keeping local file; will NOT retry automatically."
     fi
 }
 
@@ -251,16 +405,20 @@ start_upload_worker() {
 
 enqueue_upload() {
     local file="$1"
+    local remote_idx="$2"
     local base
-    local remote_idx
     base="$(basename "$file")"
 
     if [ "$UPLOAD_AFTER_EPISODE" != "yes" ] || [ -z "$UPLOAD_WORKER_PID" ]; then
         return
     fi
 
-    remote_idx=$REMOTE_EPISODE_NEXT
-    REMOTE_EPISODE_NEXT=$((REMOTE_EPISODE_NEXT + 1))
+    if [ -z "$remote_idx" ]; then
+        remote_idx=$REMOTE_EPISODE_NEXT
+    fi
+    if [ "$remote_idx" -ge "$REMOTE_EPISODE_NEXT" ]; then
+        REMOTE_EPISODE_NEXT=$((remote_idx + 1))
+    fi
     echo "[upload] queued ${base} -> remote episode_${remote_idx}.hdf5; collection will continue while upload runs."
     printf '%s\t%s\n' "$file" "$remote_idx" >&${UPLOAD_QUEUE_FD}
 }
@@ -290,13 +448,18 @@ cleanup_on_interrupt() {
 
 trap cleanup_on_interrupt INT TERM
 
+validate_frame_rate
+validate_description_ranges_for_run
 init_remote_upload
 start_upload_worker
 
 # ============ Episode loop ============
 for ((i=0; i<EPISODES; i++)); do
+    EPISODE_DESCRIPTION="$(description_for_episode "$i")"
+    EPISODE_DESCRIPTION="$(confirm_episode_description "$i" "$EPISODE_DESCRIPTION")"
     echo "============================="
-    echo "Collecting episode $i / $((EPISODES - 1))"
+    echo "Collecting local episode $i / $((EPISODES - 1))"
+    echo "Description: ${EPISODE_DESCRIPTION}"
     echo "Hold both-hand pinch 2s to ENGAGE; long-hold both-hand pinch 4s to STOP."
     echo "============================="
 
@@ -306,7 +469,7 @@ for ((i=0; i<EPISODES; i++)); do
     python3 "$SCRIPT_DIR/collect_data_3arm.py" \
         --dataset_dir "$DATASET_DIR" \
         --task_name "$TASK_NAME" \
-        --task_description "$TASK_DESCRIPTION" \
+        --task_description "$EPISODE_DESCRIPTION" \
         --episode_idx "$i" \
         --max_timesteps "$MAX_TIMESTEPS" \
         --frame_rate "$FRAME_RATE"
