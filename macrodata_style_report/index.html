@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EgoVid × HomER：机器人/第一视角视频子任务标注消融长报告</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,650;8..60,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/report.css" />
+</head>
+<body>
+  <nav class="topnav">
+    <div class="topnav-inner">
+      <a class="brand" href="#">EgoVid · HomER Report</a>
+      <a href="#tldr">TL;DR</a>
+      <a href="#why">动机</a>
+      <a href="#metrics">指标</a>
+      <a href="#seg">分段</a>
+      <a href="#label">标注</a>
+      <a href="#e2e">E2E</a>
+      <a href="#lessons">教训</a>
+      <a href="#recipe">最佳菜谱</a>
+      <a href="#prompts">Prompts</a>
+      <a href="#audit">审计</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="eyebrow">WGO-Bench HomER · EgoVid annotation ablations</div>
+    <h1>把长视频切成可执行子任务：我们试过什么，什么真正涨分</h1>
+    <p class="lede">
+      这是一份 Macrodata
+      <a href="https://macrodata.co/blog/annotating-robot-video-subtasks" target="_blank" rel="noopener">Annotating Robot Video Subtasks</a>
+      风格的长报告：在 <strong>HomER 25 集 / 470 gold 段</strong> 上系统记录 EgoVid 标注管线的全部分段、标注与端到端消融，
+      包括失败项、完整 prompt、计分 walkthrough，以及当前可复现的最佳组合。
+    </p>
+  </header>
+
+  <main class="wrap">
+    <p id="load-error" class="callout bad" hidden>无法加载 <code>data/results.json</code>。请用本地静态服务器打开本目录（例如 <code>python3 -m http.server</code>），不要直接用部分浏览器的 file:// 限制。</p>
+
+    <section id="tldr">
+      <h2>TL;DR</h2>
+      <div class="tldr">
+        <div class="card">
+          <div class="k">Best Segment F1</div>
+          <div class="v">0.2031</div>
+          <div class="s">S2 pad=0 full-cover · Qwen3.6 · 79/308/470</div>
+        </div>
+        <div class="card">
+          <div class="k">Best Label Acc（gold 边界）</div>
+          <div class="v">51.1%</div>
+          <div class="s">真 HaWoR hand-crop · 397B（raw 50.6%）</div>
+        </div>
+        <div class="card">
+          <div class="k">Best E2E F1</div>
+          <div class="v">0.1517</div>
+          <div class="s">上列边界 + 397B candidate selector</div>
+        </div>
+      </div>
+      <ul>
+        <li>对照 Macrodata blog：全量 100 上 Gemini Segment F1≈<strong>0.306</strong>、label≈<strong>61%</strong>、E2E≈<strong>0.168</strong>；HomER-only Gemini 分段更公平的天花板约 <strong>0.227</strong>。</li>
+        <li>我们没有 Gemini 作为主线时，开源同 recipe 大约 0.11–0.14；通过 <strong>整集 + GEPA + S2 full-cover</strong> 把 HomER 分段推到 <strong>0.203</strong>。</li>
+        <li>多数「blog 同款视觉花样」（邻段 sheet、整帧 collage、YOLO hand-collage）在 Qwen 上<strong>伤标注分</strong>；E2E 涨分主要靠 <strong>锁边界后换大模型多候选 + selector</strong>。</li>
+        <li>F1 <strong>越大越好</strong>，理论上限 <strong>1.0</strong>。</li>
+      </ul>
+    </section>
+
+    <section id="toc">
+      <h2>目录</h2>
+      <div class="toc">
+        <ol>
+          <li><a href="#why">为什么要标子任务</a></li>
+          <li><a href="#bench">评测协议：HomER 子集</a></li>
+          <li><a href="#metrics">三个指标怎么算</a></li>
+          <li><a href="#contact">Contact sheet 是什么</a></li>
+          <li><a href="#seg">Part I：分段消融</a></li>
+          <li><a href="#label">Part II：标注消融</a></li>
+          <li><a href="#e2e">Part III：E2E 与候选选择</a></li>
+          <li><a href="#lessons">失败模式与教训</a></li>
+          <li><a href="#recipe">最佳可复现菜谱</a></li>
+          <li><a href="#prompts">Prompt 全文附录</a></li>
+          <li><a href="#audit">审计与实现细节</a></li>
+          <li><a href="#source">数字溯源与交付</a></li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="why">
+      <h2>1. 为什么要标子任务</h2>
+      <p>
+        高层指令（「做一道菜」「整理桌面」）对机器人学习往往太粗。子任务标注回答两件事：
+        <strong>这一刻在做什么</strong>，以及 <strong>上一个动作在哪结束、下一个从哪开始</strong>。
+        Macrodata 的 WGO-Bench 把这件事变成可迭代的 benchmark；我们用其中最难的 egocentric 子集 HomER，
+        在自有 EgoVid 管线 + 本地/隧道 Qwen 上做可复现消融。
+      </p>
+      <div class="callout">
+        <strong>本报告范围：</strong>HomER 25 episodes · 470 gold segments · 主指标 Segment F1@0.75（outer snap, micro）/
+        固定边界 LLM-judge Acc / Semantic E2E F1。不重跑实验；数字来自已落盘的 V5.1 / Expert 包。
+      </div>
+    </section>
+
+    <section id="bench">
+      <h2>2. 评测协议：HomER 子集</h2>
+      <table>
+        <thead><tr><th>项</th><th>值</th></tr></thead>
+        <tbody>
+          <tr><td>子集</td><td>HomER（第一视角人类操作）</td>
+          <tr><td>Episodes</td><td>25</td></tr>
+          <tr><td>Gold segments</td><td>470</td></tr>
+          <tr><td>分段匹配</td><td>temporal IoU ≥ 0.75，greedy 1-1</td></tr>
+          <tr><td>Outer snap</td><td>首段 start / 末段 end 对齐到 gold 外边界</td></tr>
+          <tr><td>聚合</td><td>micro（先加总 match/pred/gold 再算 F1）</td></tr>
+          <tr><td>标注 Track A</td><td>gold 边界固定，只评 caption</td></tr>
+          <tr><td>Judge</td><td>另一次 LLM 调用（默认 Qwen3.5-397B）</td></tr>
+        </tbody>
+      </table>
+      <div class="callout warn">
+        <strong>别和 blog headline 硬比：</strong>0.306 是 Gemini + 全量 100。
+        HomER 更密更短；对照时优先看 HomER-only Gemini ≈0.227，以及开源同 recipe ≈0.11–0.14。
+      </div>
+    </section>
+
+    <section id="metrics">
+      <h2>3. 三个指标怎么算（含玩具 walkthrough）</h2>
+      <h3>3.1 Segment F1 —— 只考时间切得准不准</h3>
+      <p><strong>P</strong> = 配成功数 / 预测段数；<strong>R</strong> = 配成功数 / gold 段数；
+        <strong>F1</strong> = 2PR/(P+R)。越大越好，最大 1.0。</p>
+      <h3>3.2 固定边界 Annotation Accuracy</h3>
+      <p>时间用 gold；模型只写句子；judge 判断是否同一完成事件。Acc = 判对段数 / 470。</p>
+      <h3>3.3 Semantic E2E F1</h3>
+      <p>先做时间配对，再对配对成功的 pair 做语义 judge；两边都过才计入 semantic match，再算 F1。</p>
+
+      <h3>玩具例子（与 scorer 一致）</h3>
+      <p>Gold：G0[0,3], G1[3,6], G2[6,10] · Pred：P0[0.5,2.8], P1[2.8,5.5], P2[5.5,8], P3[8,9.5]</p>
+      <ol>
+        <li><strong>Outer snap</strong>：P0.start→0，P3.end→10</li>
+        <li><strong>IoU</strong>：P0–G0≈0.933，P1–G1≈0.781（其余 &lt;0.75）</li>
+        <li><strong>Greedy 1-1</strong>：n_match=2</li>
+        <li><strong>P/R/F1</strong>：P=2/4=0.50，R=2/3≈0.67，F1≈0.571</li>
+      </ol>
+      <div id="toy-timeline" class="timeline"></div>
+      <p>标注例子：gold=<code>pick up the red cup and place it on the shelf</code>，
+        pred=<code>place red cup onto shelf</code> → judge 通常 match=true（同动词族+物体+目标）。
+        <strong>这不是规则 parse</strong>，是再调一次 LLM。</p>
+    </section>
+
+    <section id="contact">
+      <h2>4. Contact sheet 是什么</h2>
+      <p>
+        按固定时间间隔（我们跟 blog 一样约 <strong>0.5 秒</strong>）抽帧，缩成约 <strong>224px</strong> 小图，
+        按时间顺序拼成一张「联系表」（约 <strong>20</strong> 格/张），格子上画<strong>可视时间戳</strong>。
+        模型看着这张拼图输出各段起止秒数——不必把整段视频当 MP4 喂进去。
+      </p>
+      <figure class="figure">
+        <div class="sheet-grid" aria-hidden="true">
+          <div class="sheet-tile"><span>0.0s</span></div>
+          <div class="sheet-tile"><span>0.5s</span></div>
+          <div class="sheet-tile"><span>1.0s</span></div>
+          <div class="sheet-tile"><span>1.5s</span></div>
+          <div class="sheet-tile"><span>2.0s</span></div>
+          <div class="sheet-tile"><span>2.5s</span></div>
+          <div class="sheet-tile"><span>3.0s</span></div>
+          <div class="sheet-tile"><span>3.5s</span></div>
+          <div class="sheet-tile"><span>4.0s</span></div>
+          <div class="sheet-tile"><span>4.5s</span></div>
+          <div class="sheet-tile"><span>5.0s</span></div>
+          <div class="sheet-tile"><span>5.5s</span></div>
+          <div class="sheet-tile"><span>6.0s</span></div>
+          <div class="sheet-tile"><span>6.5s</span></div>
+          <div class="sheet-tile"><span>7.0s</span></div>
+          <div class="sheet-tile"><span>7.5s</span></div>
+          <div class="sheet-tile"><span>8.0s</span></div>
+          <div class="sheet-tile"><span>8.5s</span></div>
+          <div class="sheet-tile"><span>9.0s</span></div>
+          <div class="sheet-tile"><span>9.5s</span></div>
+        </div>
+        <figcaption>示意：5×4 contact sheet。真实样例见 LFT/本机 demos 与 V5.1 examples（云环境未挂载原图时用此示意）。</figcaption>
+      </figure>
+      <h3>名词速查</h3>
+      <ul>
+        <li><strong>整集一次</strong>：该集所有 sheet 尽量一次塞进 API，避免窗口接缝假切点。</li>
+        <li><strong>GEPA</strong>：用自动 prompt 搜索得到的规则集（completed events + duration prior），不是新模型。</li>
+        <li><strong>S1 反欠分割</strong>：催模型多切短段，抬召回，易过分割。</li>
+        <li><strong>S2 二次精修</strong>：粗分后再对局部窗精切；<strong>full-cover + pad=0</strong> 是最强分段。</li>
+      </ul>
+    </section>
+
+    <section id="seg">
+      <h2>5. Part I：分段消融</h2>
+      <p>目标：在没有 Gemini 主线的前提下，逼近 HomER 合理天花板，并弄清每一步改动的真实贡献。</p>
+      <div class="chart-box">
+        <h4>Segment F1@0.75（HomER micro）</h4>
+        <div id="seg-bars" class="bars"></div>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>条件</th><th>F1</th><th>P / R</th><th>match/pred/gold</th><th>模型</th><th>n_ep</th><th>备注</th>
+            </tr>
+          </thead>
+          <tbody id="seg-tbody"></tbody>
+        </table>
+      </div>
+      <h3>叙事：我们怎么走到 0.203</h3>
+      <ol>
+        <li><strong>原 EgoVid</strong>：腕速启发式 + merge → F1≈0.095，pred 810，过分割。</li>
+        <li><strong>Contact sheet 分片（max3）</strong>：外形像 blog，但接缝假切；397B≈0.095，27B≈0.128。</li>
+        <li><strong>整集一次</strong>：去掉分片；欠分割出现（pred 变少）。</li>
+        <li><strong>GEPA prompt</strong>：只标完成事件 + 时长先验 → aligned <strong>0.1369</strong>（约 0.137）。</li>
+        <li><strong>S1 / 早期 S2</strong>：抬召回，F1 到 0.156 / 0.167，但仍碎。</li>
+        <li><strong>S2 pad=0 full-cover</strong>：局部短窗覆盖粗段再切 → <strong>0.2031</strong>（当前最强分段）。</li>
+        <li><strong>Gemini 2.5 Flash API</strong>：同 HomER 上约 <strong>0.072</strong>，未超过开源最强（实现/空预测问题并存）。</li>
+      </ol>
+      <div class="callout good">
+        <strong>分段结论：</strong>视觉外形对齐 blog 不够；<em>整集一次 + GEPA + S2 full-cover</em> 才是开源侧主升力。
+        模型仍重要，但「换更大/更贵」不等于自动涨（flash API 反例；27B 分片曾优于 397B 分片）。
+      </div>
+    </section>
+
+    <section id="label">
+      <h2>6. Part II：标注消融（gold 边界固定）</h2>
+      <p>Track A：不考切段，只考「给定时间窗，句子是否写对」。Judge 是另一次 LLM 调用。</p>
+      <div class="chart-box">
+        <h4>Label accuracy（%）</h4>
+        <div id="label-bars" class="bars"></div>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr><th>条件</th><th>Acc</th><th>n_match/n</th><th>模型</th><th>Δ vs raw</th><th>备注</th></tr>
+          </thead>
+          <tbody id="label-tbody"></tbody>
+        </table>
+      </div>
+      <div class="callout bad">
+        <strong>重要澄清：</strong>表里的「时序 collage」= 当前段的<strong>整帧</strong> past/current/future，
+        <em>不是</em>「前后段抽样 + 当前 handcrop」。L1 才是邻段 sheet；L2 才是手部 collage。
+      </div>
+      <h3>标注结论</h3>
+      <ul>
+        <li>默认保持 <strong>raw</strong>（50.6%）；真 HaWoR crop 微涨到 <strong>51.1%</strong>。</li>
+        <li>L1 邻段 / L2 YOLO collage / 整帧 collage 全量都跌。</li>
+        <li>L4 严 judge 让同一批 raw 变成 43%——评测尺子变了，不是模型变强/变弱。</li>
+        <li>与 blog 61% 不完全可比（Gemini judge + 不同视觉输入 + 全量子集）。</li>
+      </ul>
+    </section>
+
+    <section id="e2e">
+      <h2>7. Part III：E2E 与 Candidate Selection</h2>
+      <p>
+        线上真实是「先切再标」。我们把分段锁在 S2 full-cover（Segment F1 恒为 <strong>0.2031</strong>），
+        只改标注路径，于是表中 Segment F1 一列不动，E2E F1 上升——涨的是语义匹配。
+      </p>
+      <div class="chart-box">
+        <h4>E2E F1（边界锁定后）</h4>
+        <div id="e2e-bars" class="bars"></div>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr><th>HomER E2E variant</th><th>Segment F1</th><th>E2E F1</th><th>pred/gold</th><th>备注</th></tr>
+          </thead>
+          <tbody id="e2e-tbody"></tbody>
+        </table>
+      </div>
+      <div class="callout good">
+        <strong>最佳 E2E：</strong>Qwen3.6 负责分段（S2 full-cover）+ Qwen3.5-397B 多候选标注 +
+        <strong>397B candidate selector</strong> → E2E F1 <strong>0.1517</strong>
+        （接近 blog 全量 E2E 0.168，但仍是 HomER 子集、Qwen judge）。
+      </div>
+    </section>
+
+    <section id="lessons">
+      <h2>8. 失败模式与教训</h2>
+      <ul>
+        <li><strong>分片 contact sheet</strong>会在人工切窗处造边界；整集一次更稳。</li>
+        <li><strong>欠分割 vs 过分割</strong>：GEPA 后 pred 偏少；S1 猛催会切碎；S2 full-cover 是更好的折中。</li>
+        <li><strong>照搬 blog 视觉输入不等于涨分</strong>：邻段 sheet、糙 hand-collage 在 Qwen 上掉点。</li>
+        <li><strong>centerproxy / 光流 overlay</strong>不能冒充真 hand crop；审计里标红过。</li>
+        <li><strong>「测试太快」</strong>：多数全量是高并发真跑；但 <code>expA_raw</code> 曾整目录复制未重标——要以 API 次数与文案 diff 为准。</li>
+        <li><strong>换 API 模型</strong>不是免费午餐：gemini-2.5-flash 在我们 HomER 设定下未超过开源最强。</li>
+        <li><strong>Judge 口径</strong>会改变 Acc；汇报时要固定 judge 再比模型。</li>
+      </ul>
+    </section>
+
+    <section id="recipe">
+      <h2>9. 最佳可复现菜谱</h2>
+      <div class="pipeline">
+        <div class="step"><div class="n">01</div><div class="t">Contact sheet</div><div class="d">0.5s · 224px · ~20 tiles · 黄字时间戳</div></div>
+        <div class="step"><div class="n">02</div><div class="t">粗分</div><div class="d">整集一次 + GEPA completed-events</div></div>
+        <div class="step"><div class="n">03</div><div class="t">S2 full-cover</div><div class="d">pad=0 局部精修 · Qwen3.6 → Seg F1 0.2031</div></div>
+        <div class="step"><div class="n">04</div><div class="t">多候选 + Selector</div><div class="d">397B raw/ffmpeg/… → selector → E2E 0.1517</div></div>
+      </div>
+      <table>
+        <thead><tr><th>阶段</th><th>推荐</th><th>不要默认启用</th></tr></thead>
+        <tbody>
+          <tr><td>分段模型</td><td>Qwen3.6-27B/28B</td><td>仅靠分片 max3；未验证的贵 API</td></tr>
+          <tr><td>分段 prompt</td><td>GEPA + S2 full-cover</td><td>无规则的自由叙述</td></tr>
+          <tr><td>标注默认</td><td>raw 多帧；有 HaWoR 可试真 hand-crop</td><td>邻段 sheet / 整帧 collage / YOLO 糙 crop</td></tr>
+          <tr><td>E2E</td><td>锁 S2 边界 + 397B selector</td><td>用分段小模型自标当最终稿</td></tr>
+          <tr><td>评测</td><td>固定 judge；报 HomER micro F1</td><td>拿 0.306 headline 直接打脸自己</td></tr>
+        </tbody>
+      </table>
+      <p>脚本主要在 <code>EgoVid_annotate/scripts/wgo_bench/</code>（<code>contact_sheet_segment.py</code>、<code>label_gold_segments.py</code>、<code>judge_labels.py</code>、<code>score_segmentation.py</code>）。产物样例包：E2E 0.1517 的 25 labels+videos 已分享到标注机与 Qwen 推理机 <code>share/e2e_0.1517_homer25/</code>。</p>
+    </section>
+
+    <section id="prompts">
+      <h2>10. Prompt 全文附录</h2>
+      <p>完整 markdown 见目录 <a href="prompts/"><code>prompts/</code></a>。下面嵌入关键全文便于一页读完。</p>
+
+      <h3>10.1 GEPA <code>completed_events_duration_prior_v1</code></h3>
+      <div class="prompt-box"><pre id="p-gepa">加载中…</pre></div>
+
+      <h3>10.2 S2 full-cover 精修</h3>
+      <div class="prompt-box"><pre id="p-s2">加载中…</pre></div>
+
+      <h3>10.3 Labeling（固定边界）</h3>
+      <div class="prompt-box"><pre id="p-label">加载中…</pre></div>
+
+      <h3>10.4 Judge</h3>
+      <div class="prompt-box"><pre id="p-judge">加载中…</pre></div>
+
+      <h3>10.5 Candidate selector</h3>
+      <div class="prompt-box"><pre id="p-sel">加载中…</pre></div>
+    </section>
+
+    <section id="audit">
+      <h2>11. 审计与实现细节（避免「看起来做了其实没做」）</h2>
+      <table>
+        <thead><tr><th>项</th><th>发现</th><th>处理</th></tr></thead>
+        <tbody>
+          <tr><td>expA_raw</td><td>曾整目录复制 predictions，mtime 几乎同一秒</td><td>标红；不以该目录当「重标」证据</td></tr>
+          <tr><td>A-overlay</td><td>HomER 无 hand_recon，实为 optical_flow_proxy</td><td>报告中明确「非真 hand overlay」</td></tr>
+          <tr><td>L1 初版</td><td>tile 缺秒级时间戳</td><td>补时间戳全量重跑 → 仍跌分</td></tr>
+          <tr><td>S1/S2 smoke</td><td>幽灵 ID homer_6/8；小样本方差</td><td>改 ID 后补全量 25</td></tr>
+          <tr><td>「太快不像 25」</td><td>高并发下 470 段可在数分钟完成</td><td>用 API 次数/非空 json/文案 diff 核实</td></tr>
+          <tr><td>Hand crop</td><td>腕点 union 常打满 0.75；WGO 曾 centerproxy</td><td>真 HaWoR crop 才进入 51.1% 行</td></tr>
+        </tbody>
+      </table>
+      <h3>主要新增脚本（未改主线默认）</h3>
+      <p><code>scripts/wgo_bench/</code>：<code>metrics.py</code>、<code>score_segmentation.py</code>、<code>contact_sheet_segment.py</code>、
+        <code>label_gold_segments.py</code>、<code>judge_labels.py</code>，以及 L*/S* 消融与 <code>run_*.sh</code>。
+        实验用独立目录 <code>exp*</code>，默认 EgoVid 管线行为保持不变。</p>
+    </section>
+
+    <section id="source">
+      <h2>12. 数字溯源与交付</h2>
+      <p>详见 <a href="SOURCE.md">SOURCE.md</a> 与 <a href="data/results.json">data/results.json</a>。</p>
+      <ul>
+        <li>主文档：V5.1 中英报告、Expert Review Packet、Full Plain Language Report</li>
+        <li>对照：<a href="https://macrodata.co/blog/annotating-robot-video-subtasks">Macrodata blog</a>、<a href="https://labs.scale.com/blog/path-to-large-scale-dense-video-captioning">Scale dense captioning</a></li>
+        <li>本站路径：<code>/opt/cursor/artifacts/macrodata_style_report/</code>（建议 <code>python3 -m http.server 8765</code>）</li>
+        <li>E2E 0.1517 样例包（25 视频+标注）曾同步至 LFT / Qwen 机 <code>share/e2e_0.1517_homer25/</code></li>
+      </ul>
+      <div class="callout warn">
+        本云环境无法直连 LFT（10.12.153.18）与 Qwen 入口；静态站已自包含数据与 prompts。
+        若需把本站同步到标注机/Qwen 机，在可 SSH 的环境执行 rsync 即可。
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    EgoVid × WGO HomER ablation report · 静态站 · 数字以 HomER 25/470 为准 · F1 越大越好（上限 1.0）
+  </footer>
+
+  <script src="js/report.js"></script>
+  <script src="js/prompts_embed.js"></script>
+  <script>
+    async function loadPrompt(id, file) {
+      const map = {
+        "p-gepa": "gepa_completed_events_duration_prior_v1.md",
+        "p-s2": "s2_fullcover_refine.md",
+        "p-label": "labeling_fixed_boundary.md",
+        "p-judge": "judge_semantic_match.md",
+        "p-sel": "candidate_selector.md",
+      };
+      const name = map[id] || file;
+      if (window.__PROMPTS__ && window.__PROMPTS__[name]) {
+        document.getElementById(id).textContent = window.__PROMPTS__[name];
+        return;
+      }
+      try {
+        const t = await fetch("prompts/" + name).then((r) => r.text());
+        document.getElementById(id).textContent = t;
+      } catch (e) {
+        document.getElementById(id).textContent = "无法加载 " + name;
+      }
+    }
+    loadPrompt("p-gepa");
+    loadPrompt("p-s2");
+    loadPrompt("p-label");
+    loadPrompt("p-judge");
+    loadPrompt("p-sel");
+  </script>
+</body>
+</html>
