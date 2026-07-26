@@ -7,8 +7,21 @@ import numpy as np
 import asyncio
 
 class OpenTeleVision:
-    def __init__(self, img_shape, shm_name, stereo=True, cert_file=os.path.join(os.path.dirname(__file__), "cert.pem"), key_file=os.path.join(os.path.dirname(__file__), "key.pem")):
+    def __init__(
+        self,
+        img_shape,
+        shm_name,
+        stereo=True,
+        cert_file=os.path.join(os.path.dirname(__file__), "cert.pem"),
+        key_file=os.path.join(os.path.dirname(__file__), "key.pem"),
+        image_kwargs=None,
+        stream_fps=60,
+        image_quality=60,
+    ):
         self.stereo = stereo
+        self.image_kwargs = image_kwargs or {}
+        self.stream_fps = stream_fps
+        self.image_quality = image_quality
         if self.stereo:
             self.img_shape = (img_shape[0], 2*img_shape[1], 3)
         else:
@@ -85,7 +98,8 @@ class OpenTeleVision:
             # print(f"Error updating right_landmarks_shared: {e}")
             pass
 
-    async def main(self, session, fps=60):
+    async def main(self, session, fps=None):
+        fps = self.stream_fps if fps is None else fps
         try:
             session.upsert @ Hands(fps=fps, stream=True, key="hands", showLeft=True, showRight=True)
         except Exception as e:
@@ -98,11 +112,18 @@ class OpenTeleVision:
                 start_time = time.time()
                 display_image = self.img_array
                 if not self.stereo:
+                    image_kwargs = dict(
+                        aspect=1.6,
+                        distanceToCamera=2,
+                        position=[0, 0, -2],
+                        rotation=[0, 0, 0],
+                    )
+                    image_kwargs.update(self.image_kwargs)
                     session.upsert(
                     ImageBackground(
                         display_image[:, :self.img_width],
                         format="jpeg",
-                        quality=60,
+                        quality=self.image_quality,
                         key="left-image",
                         interpolate=True,
                         # IMG_SHAPE is (480, 640) = 4:3 -> natural aspect 1.333,
@@ -111,10 +132,7 @@ class OpenTeleVision:
                         # Bumping aspect to 1.6 compresses the height ~20% with
                         # mild horizontal stretch -- a compromise between
                         # 1.333 (too tall) and 1.778 (too wide, the original).
-                        aspect=1.6,
-                        distanceToCamera=2,
-                        position=[0, 0, -2],   # raise panel to eye level so
-                        rotation=[0, 0, 0],    # the bottom edge is visible
+                        **image_kwargs,
 
                     ),
                     to="bgChildren",
@@ -123,6 +141,18 @@ class OpenTeleVision:
                     # end_time = time.time()
                     rest_time = 1/fps - time.time() + start_time
                 else:
+                    image_kwargs = dict(
+                        aspect=1.778,
+                        height=8,
+                        position=[0, -1, 3],
+                        layers=1,
+                        alphaSrc="./vinette.jpg",
+                    )
+                    image_kwargs.update(self.image_kwargs)
+                    left_kwargs = dict(image_kwargs)
+                    right_kwargs = dict(image_kwargs)
+                    left_kwargs["layers"] = 1
+                    right_kwargs["layers"] = 2
                     session.upsert(
                     [ImageBackground(
                         # Can scale the images down.
@@ -130,17 +160,13 @@ class OpenTeleVision:
                         # display_image[:self.img_height:2, ::2],
                         # 'jpg' encoding is significantly faster than 'png'.
                         format="jpeg",
-                        quality=75,
+                        quality=self.image_quality,
                         key="left-image",
                         interpolate=True,
                         # fixed=True,
-                        aspect=1.778,
                         # distanceToCamera=0.5,
-                        height = 8,
-                        position=[0, -1, 3],
                         # rotation=[0, 0, 0],
-                        layers=1, 
-                        alphaSrc="./vinette.jpg"
+                        **left_kwargs,
                     ),
                     ImageBackground(
                         # Can scale the images down.
@@ -148,17 +174,13 @@ class OpenTeleVision:
                         # display_image[self.img_height::2, ::2],
                         # 'jpg' encoding is significantly faster than 'png'.
                         format="jpeg",
-                        quality=75,
+                        quality=self.image_quality,
                         key="right-image",
                         interpolate=True,
                         # fixed=True,
-                        aspect=1.778,
                         # distanceToCamera=0.5,
-                        height = 8,
-                        position=[0, -1, 3],
                         # rotation=[0, 0, 0],
-                        layers=2, 
-                        alphaSrc="./vinette.jpg"
+                        **right_kwargs,
                     )],
                     to="bgChildren",
                     )
