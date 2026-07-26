@@ -323,3 +323,90 @@ T_arm_from_ee = inv(T_unified_from_arm) @ T_unified_from_ee
 ```
 
 再调用和 teleop/`play_data_eef_ik.py` 相同的 IK + ramp + joint step limit。gripper 仍然来自 `action` 里每个臂的第 7 维。
+
+### Hybrid Unified Action 回放
+
+推荐训练动作表示:
+
+```text
+left/right = unified teleop IK EEF pose
+mid        = unified cam_front camera pose
+gripper    = left/right gripper only
+```
+
+对应 HDF5 字段:
+
+```text
+observations/ee_pose_in_unified/{left,right}/quat
+observations/camera_pose_in_unified/cam_front/quat
+action[:, 6], action[:, 13]
+```
+
+测试这个表示是否能顺滑回放:
+
+```bash
+python data_collect/play_data_hybrid_unified_ik.py /path/to/episode_0.hdf5 \
+    --pose_source quat \
+    --execute \
+    --max_joint_step 0.05
+```
+
+中臂执行时脚本会用 hand-eye 把 `cam_front` pose 反推出 mid EEF pose:
+
+```text
+T_unified_from_mid_ee = T_unified_from_cam_front @ inverse(T_mid_ee_from_cam_front)
+```
+
+LeRobot 转换后的 dataset 会直接写出:
+
+```text
+action.hybrid.left_ee_pose_in_unified.quat
+action.hybrid.right_ee_pose_in_unified.quat
+action.hybrid.mid_camera_pose_in_unified.quat
+action.hybrid.gripper
+observation.camera_pose_in_unified.{quat,rpy,matrix}.{cam_front,cam_left,cam_right}
+meta/camera_info.json
+```
+
+---
+
+## 中臂固定相机位
+
+如果要把中臂固定成一个稳定相机视角,在 inference 模式或数采模式启动三臂和相机后,单独开一个终端运行:
+
+```bash
+conda activate aloha
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop
+python teleop/fix_mid_camera_pose.py
+```
+
+脚本会发布到:
+
+```text
+/master/joint_mid
+```
+
+目标中臂关节位:
+
+```text
+[0.032167, 0.133726, -0.643439, 0.010414, 1.297816, -0.060217]
+```
+
+默认流程:
+
+1. 等待 `/puppet/joint_mid` 反馈。
+2. 打印当前 joint 和目标 joint。
+3. 回车后慢速 ramp 到固定相机位。
+4. 持续发布目标 joint,保持中臂不动。
+
+确认安全后想跳过回车:
+
+```bash
+python teleop/fix_mid_camera_pose.py --no_confirm
+```
+
+只 ramp 一次然后退出,不持续 hold:
+
+```bash
+python teleop/fix_mid_camera_pose.py --no_hold
+```
