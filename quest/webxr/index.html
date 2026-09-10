@@ -64,6 +64,19 @@ function connectWs() {
   ws.onopen = () => { wsOpen = true; setStatusLine("ws", "OPEN", true); };
   ws.onclose = () => { wsOpen = false; setStatusLine("ws", "CLOSED (retrying)", false); setTimeout(connectWs, 1000); };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  // Incoming messages are camera frames relayed by webxr_server.py's
+  // CameraBridge (see camera_streamer.py); this connection never receives
+  // anything else. updateCamTexture/CAM_NAMES are defined later in this
+  // file but that's fine -- this callback only runs once real messages
+  // arrive, well after the whole script has finished evaluating.
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type !== "camera") return;
+    const got = CAM_NAMES.filter((n) => msg[n]);
+    for (const name of got) updateCamTexture(name, msg[name]);
+    if (got.length) setStatusLine("cam", got.join(",") + " @ " + new Date().toLocaleTimeString(), true);
+  };
 }
 connectWs();
 
@@ -74,7 +87,7 @@ function setStatusLine(key, text, ok) {
 }
 function renderStatus() {
   const el = document.getElementById("status");
-  const order = ["ws", "xr", "head", "left", "right"];
+  const order = ["ws", "xr", "head", "left", "right", "cam"];
   el.innerHTML = order
     .filter((k) => statusLines[k])
     .map((k) => {
@@ -408,8 +421,9 @@ function renderHudText(engaged, panic, head, left, right, headM, leftM, rightM) 
 }
 
 function drawHud(vp, headM) {
-  // Follows the head: positioned 0.75m in front, slightly below eye line.
-  const model = mat4Multiply(headM, mat4Translate(0, -0.05, -0.75));
+  // Follows the head: positioned in front and below eye line, clear of the
+  // camera panel row above it (see CAM_Y_OFFSET / drawCameraPanels).
+  const model = mat4Multiply(headM, mat4Translate(0, -0.25, -0.85));
   const mvp = mat4Multiply(vp, model);
   gl.useProgram(texProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
@@ -423,6 +437,83 @@ function drawHud(vp, headM) {
   gl.uniform1i(texLoc.uTex, 0);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadIBO);
   gl.drawElements(gl.TRIANGLES, quadIdx.length, gl.UNSIGNED_SHORT, 0);
+}
+
+// Generic unit quad (-0.5..+0.5 both axes), scaled per-draw via the model
+// matrix -- unlike the HUD's fixed-size quadVBO above, camera panels come in
+// 3 different world positions sharing one size, so a reusable unit quad is
+// less repetition than baking size into the geometry per-panel.
+const unitQuadVerts = new Float32Array([
+  -0.5, -0.5, 0,  0, 1,
+   0.5, -0.5, 0,  1, 1,
+   0.5,  0.5, 0,  1, 0,
+  -0.5,  0.5, 0,  0, 0,
+]);
+const unitQuadVBO = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, unitQuadVBO);
+gl.bufferData(gl.ARRAY_BUFFER, unitQuadVerts, gl.STATIC_DRAW);
+const unitQuadIBO = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, unitQuadIBO);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, quadIdx, gl.STATIC_DRAW);  // same 0,1,2,0,2,3 winding as the HUD quad
+
+// ---- camera panels ----------------------------------------------------------
+// In-VR visual feedback (see camera_streamer.py + webxr_server.py's
+// CameraBridge). A row of 3 panels above the HUD: left/mid/right cameras,
+// left-to-right matching their physical position on the robot. Sizes/
+// distance are a first guess -- expect to retune after actually seeing them
+// on-headset, same as the HUD needed a size pass.
+const CAM_NAMES = ["left", "mid", "right"];
+const CAM_PANEL_W = 0.38, CAM_PANEL_H = 0.26, CAM_GAP = 0.04, CAM_DIST = 0.85, CAM_Y = 0.20;
+const CAM_X_OFFSET = { left: -(CAM_PANEL_W + CAM_GAP), mid: 0, right: (CAM_PANEL_W + CAM_GAP) };
+
+const camTex = {};
+for (const name of CAM_NAMES) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  // 1x1 placeholder (dark gray) until the first real frame arrives.
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([40, 40, 50, 255]));
+  camTex[name] = tex;
+}
+
+async function updateCamTexture(name, base64Jpeg) {
+  try {
+    const bin = atob(base64Jpeg);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+    gl.bindTexture(gl.TEXTURE_2D, camTex[name]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+    bitmap.close();
+  } catch (e) {
+    // Drop malformed/partial frames silently -- not worth spamming the
+    // console at the camera stream's send rate.
+  }
+}
+
+function drawCameraPanels(vp, headM) {
+  for (const name of CAM_NAMES) {
+    const local = mat4Multiply(
+      mat4Translate(CAM_X_OFFSET[name], CAM_Y, -CAM_DIST),
+      mat4Scale(CAM_PANEL_W, CAM_PANEL_H, 1),
+    );
+    const model = mat4Multiply(headM, local);
+    const mvp = mat4Multiply(vp, model);
+    gl.useProgram(texProgram);
+    gl.bindBuffer(gl.ARRAY_BUFFER, unitQuadVBO);
+    gl.enableVertexAttribArray(texLoc.aPos);
+    gl.vertexAttribPointer(texLoc.aPos, 3, gl.FLOAT, false, 5 * 4, 0);
+    gl.enableVertexAttribArray(texLoc.aUV);
+    gl.vertexAttribPointer(texLoc.aUV, 2, gl.FLOAT, false, 5 * 4, 3 * 4);
+    gl.uniformMatrix4fv(texLoc.uMVP, false, mvp);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, camTex[name]);
+    gl.uniform1i(texLoc.uTex, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, unitQuadIBO);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+  }
 }
 
 // ---- WebXR session ---------------------------------------------------------
@@ -534,6 +625,7 @@ async function enterVR() {
         if (replica.lockRight) drawBox(VP, replica.lockRight, [0.04, 0.04, 0.04], [1.0, 0.6, 0.5, 1], true);
       }
 
+      drawCameraPanels(VP, headM);
       drawHud(VP, headM);
     }
   });

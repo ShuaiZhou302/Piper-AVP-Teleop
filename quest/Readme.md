@@ -9,14 +9,17 @@ the Windows box driving the headset.
 [Quest 2 headset]                    [Windows PC]                        [cobot_magic, over SSH/VPN]
  Meta Quest Browser        HTTPS/WSS   webxr_server.py                     quest_server.py
    (WebXR session,        same LAN     (serves index.html,                  ArmChannel x3 (mid/left/right)
-    XRInputSource.gamepad) ────────►    relays JSON -> wire        SSH -L   PinocchioIKSolver (../teleop/)
-                                        protocol frames)  ───────► tunnel   -> /master/joint_mid
+    XRInputSource.gamepad) ────pose───►  relays JSON -> wire        SSH -L   PinocchioIKSolver (../teleop/)
+                                         protocol frames)  ───────► tunnel   -> /master/joint_mid
                                                                              -> /master/joint_left
                                                                              -> /master/joint_right
                                                                              -> /cmd_vel (Twist, base)
                                                                                       │
                                                                                       ▼
                                                                           piper driver + slate_base_node
+ 3 textured panels          ◄──camera── CameraBridge          ◄──SSH── camera_streamer.py
+ (drawCameraPanels)                     (broadcasts to all              (3x ROS Image -> JPEG,
+                                          connected browsers)             separate port from pose)
 ```
 
 Head drives the **mid** arm, left controller drives the **left** arm, right
@@ -135,13 +138,30 @@ roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch
 #    linear.x + angular.z only), has its own 300ms cmd_vel timeout baked in.
 rosrun interbotix_slate_driver slate_base_node
 
-# 4. Cameras (optional for pose-only teleop)
+# 4. Cameras -- required for in-VR visual feedback (step 6 below); optional
+#    if you only care about arm/base motion without watching the feed.
 roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/multi_camera_shuai.launch
 
 # 5. Quest teleop server
 cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/quest
 python quest_server.py
+
+# 6. Camera streamer -- SEPARATE terminal/process from quest_server.py on
+#    purpose (see camera_streamer.py's docstring): image encode/JPEG work
+#    must never share a process with the 50 Hz arm control loop.
+conda activate aloha
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/quest
+python camera_streamer.py
 ```
+
+`camera_streamer.py` binds `127.0.0.1:8771` (also SSH-tunnel-only, same as
+`quest_server.py`'s `8770`). Default topics match `eef_avp_control_singlearm.py`'s
+conventions (`/camera_l`, `/camera_f` for mid, `/camera_r`, all
+`color/image_raw`) -- override with `--left_topic`/`--mid_topic`/`--right_topic`
+if `multi_camera_shuai.launch` publishes under different names on your setup.
+`--rate` defaults to a conservative 5 Hz and `--max_w`/`--max_h`/`--jpeg_quality`
+control the downsample -- this is for situational awareness while
+teleoperating, not a vision pipeline, so err low if the link feels laggy.
 
 Gripper torque is already hardware-limited independent of anything in this
 repo: every `/master/joint_<arm>` message's gripper value passes through
@@ -162,7 +182,8 @@ AVP script) before accepting teleop input.
 
 ## 5. Run the WebXR bridge + enter VR
 
-On Windows:
+On Windows -- first make sure `scripts\start_tunnel.ps1` is running (it now
+forwards both the pose port 8770 and the camera port 8771; see step 3):
 
 ```powershell
 cd quest\webxr
@@ -177,8 +198,8 @@ https://<this PC's LAN IP>:8443
 
 Tap **Enter VR**. The 2D page (visible before/after entering VR, and on the
 PC if you load the same URL there) shows live `ws:`/`xr:`/`head:`/`left:`/
-`right:` status lines — useful for confirming tracking before committing to
-the headset. Once `quest_server.py` logs `[teleop] ready.`, the system is
+`right:`/`cam:` status lines — useful for confirming tracking before
+committing to the headset. Once `quest_server.py` logs `[teleop] ready.`, the system is
 live.
 
 ## 6. Controls
@@ -233,14 +254,18 @@ math is ever touched.
 
 ## 9. Known gaps / follow-ups
 
-- **No visual feedback loop yet.** The AVP flow pushes the robot's camera
-  feed back into the headset via Vuer's `ImageBackground`; `index.html`
-  renders nothing (a bare WebXR session with a cleared framebuffer, which is
-  all the spec requires to keep `requestAnimationFrame` firing). Today the
-  operator tele-operates blind, or by watching a monitor separately. If this
-  needs solving, the natural next step is pushing camera frames into
-  `index.html`'s WebGL context as a background quad — same idea as Vuer's
-  `ImageBackground`, just hand-rolled.
+- **Visual feedback exists but is untuned.** `camera_streamer.py` +
+  `webxr_server.py`'s `CameraBridge` + `index.html`'s 3 textured panels
+  (`drawCameraPanels`) push all 3 cameras into the headset, same idea as the
+  AVP flow's Vuer `ImageBackground`, hand-rolled instead. Verified end-to-end
+  through `webxr_server.py` with a synthetic camera source (no real robot
+  cameras involved in that test); panel size/position/distance
+  (`CAM_PANEL_W/H`, `CAM_DIST`, `CAM_Y`, `CAM_X_OFFSET` in `index.html`) are
+  first-guess placeholder values and the JPEG orientation (flip/no-flip) is
+  *assumed* consistent with the HUD's empirically-verified convention, not
+  independently confirmed -- both need an actual on-headset look with real
+  camera frames before you'd want to rely on this for anything beyond "is
+  something roughly in view."
 - **Single WebSocket client at a time**, and separately, **single TCP
   bridge-to-robot client at a time**. `webxr_server.py` will happily accept
   a second browser tab, but `quest_server.py`'s accept loop only serves one

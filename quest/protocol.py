@@ -3,9 +3,14 @@ Wire protocol between quest_client.py (Windows, OpenVR/SteamVR) and
 quest_server.py (cobot_magic, ROS + Pinocchio IK).
 
 One length-prefixed JSON frame per sample, sent over a TCP socket that is
-carried through an SSH -L tunnel (see scripts/start_tunnel.ps1). The link is
-one-directional: client -> server. The server never talks back over this
-socket (robot feedback, if needed, stays on its existing ROS topics).
+carried through an SSH -L tunnel (see scripts/start_tunnel.ps1). Two
+independent connections share this framing:
+  - pose/button stream (DEFAULT_PORT): browser -> quest_server.py, one-way.
+  - camera stream (DEFAULT_CAMERA_PORT): camera_streamer.py -> browser, the
+    OTHER way, on a SEPARATE port/connection on purpose -- sharing one
+    connection would let a large image frame sit in front of a time-critical
+    pose frame in the same send queue.
+Neither direction ever replies on the other's socket.
 
 Poses are shipped RAW in the OpenVR "standing" world frame (+Y up, +Z back,
 right-handed) -- the SAME convention documented in avp/Readme.md section 9
@@ -24,10 +29,15 @@ import json
 import struct
 
 PROTOCOL_VERSION = 1
-DEFAULT_PORT = 8770
+DEFAULT_PORT = 8770         # pose/button stream: browser -> quest_server.py
+DEFAULT_CAMERA_PORT = 8771  # camera stream: camera_streamer.py -> browser (opposite
+                             # direction, deliberately a SEPARATE TCP connection/port
+                             # so a large image frame can never sit in front of a
+                             # time-critical pose frame -- see camera_streamer.py)
 
 _HEADER = struct.Struct("!I")  # 4-byte big-endian length prefix
-MAX_FRAME_BYTES = 1 << 20      # 1 MiB sanity cap, real frames are ~1 KB
+MAX_FRAME_BYTES = 4 << 20      # 4 MiB sanity cap -- pose frames are ~1 KB, camera
+                                # frames (3x base64 JPEG) are the ones that need headroom
 
 
 def encode(msg):

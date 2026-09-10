@@ -7,6 +7,11 @@ the SSH -L tunnel, re-using the exact same length-prefixed wire protocol
 quest_client.py used for the OpenVR path (see protocol.py) -- so
 quest_server.py itself needs ZERO changes for this transport switch.
 
+Also relays the OTHER direction: camera_streamer.py's JPEG frames (a
+SEPARATE TCP connection/port from the pose stream on purpose, see
+protocol.py) get broadcast to every connected browser WebSocket as-is, for
+in-headset visual feedback while teleoperating (see CameraBridge).
+
 Why this exists instead of reusing avp/tele_vision.py's Vuer wrapper: the
 pinned vuer==0.0.31rc7's Python schema has a `Gamepads` scene component, but
 the bundled client_build JS does NOT implement it (confirmed by grepping the
@@ -39,6 +44,7 @@ import asyncio
 import json
 import os
 import ssl
+import struct
 import sys
 import time
 
@@ -47,7 +53,7 @@ from websockets.asyncio.server import serve
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from protocol import encode, DEFAULT_PORT  # noqa: E402
+from protocol import encode, DEFAULT_PORT, DEFAULT_CAMERA_PORT, MAX_FRAME_BYTES  # noqa: E402
 
 PAGE_PATH = os.path.join(HERE, "index.html")
 CERT = os.path.join(HERE, "cert.pem")
@@ -104,6 +110,72 @@ class RobotBridge:
             self.writer = None
 
 
+_CAM_HEADER = struct.Struct("!I")
+
+
+async def _read_frame(reader):
+    """Async counterpart of protocol.FrameReader, for asyncio streams. Returns
+    None on clean EOF (peer closed)."""
+    try:
+        header = await reader.readexactly(4)
+    except asyncio.IncompleteReadError:
+        return None
+    (length,) = _CAM_HEADER.unpack(header)
+    if length > MAX_FRAME_BYTES:
+        raise ValueError("frame too large: %d bytes" % length)
+    try:
+        body = await reader.readexactly(length)
+    except asyncio.IncompleteReadError:
+        return None
+    return json.loads(body.decode("utf-8"))
+
+
+class CameraBridge:
+    """Reads camera frames from camera_streamer.py (cobot_magic) and
+    broadcasts each one to every currently connected browser WebSocket.
+
+    Opposite data direction from RobotBridge (robot -> browser, not browser
+    -> robot) but the same reconnect philosophy: a dropped/absent connection
+    just means no camera frames arrive, it is never treated as fatal.
+    """
+
+    def __init__(self, host, port, clients, reconnect_delay=1.0):
+        self.host = host
+        self.port = port
+        self.clients = clients  # set of currently-open websocket connections
+        self.reconnect_delay = reconnect_delay
+
+    def start(self):
+        asyncio.ensure_future(self._run())
+
+    async def _run(self):
+        while True:
+            try:
+                reader, writer = await asyncio.open_connection(self.host, self.port)
+            except OSError as e:
+                print("[cam] connect failed (%s); retrying in %.1fs" % (e, self.reconnect_delay))
+                await asyncio.sleep(self.reconnect_delay)
+                continue
+            print("[cam] connected to %s:%d" % (self.host, self.port))
+            try:
+                while True:
+                    frame = await _read_frame(reader)
+                    if frame is None:
+                        break
+                    frame["type"] = "camera"
+                    msg = json.dumps(frame)
+                    for ws in list(self.clients):
+                        try:
+                            await ws.send(msg)
+                        except Exception:
+                            self.clients.discard(ws)
+            except (OSError, ValueError) as e:
+                print("[cam] recv error: %s" % e)
+            writer.close()
+            print("[cam] disconnected from %s:%d; reconnecting" % (self.host, self.port))
+            await asyncio.sleep(self.reconnect_delay)
+
+
 def make_process_request(page_bytes):
     def process_request(connection, request):
         if request.path in ("/", "/index.html"):
@@ -126,6 +198,8 @@ async def main():
     ap.add_argument("--robot_host", default="127.0.0.1",
                      help="Where quest_server.py is reachable, via the SSH -L tunnel.")
     ap.add_argument("--robot_port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--camera_port", type=int, default=DEFAULT_CAMERA_PORT,
+                     help="Where camera_streamer.py is reachable, via the SSH -L tunnel.")
     args = ap.parse_args()
 
     if not (os.path.isfile(CERT) and os.path.isfile(KEY)):
@@ -139,12 +213,17 @@ async def main():
     bridge = RobotBridge(args.robot_host, args.robot_port)
     bridge.start()
 
+    clients = set()
+    camera_bridge = CameraBridge(args.robot_host, args.camera_port, clients)
+    camera_bridge.start()
+
     n_frames = 0
     t_last_status = 0.0
 
     async def handler(websocket):
         nonlocal n_frames, t_last_status
         print("[ws] client connected: %s" % (websocket.remote_address,))
+        clients.add(websocket)
         try:
             async for raw in websocket:
                 try:
@@ -160,6 +239,7 @@ async def main():
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
+            clients.discard(websocket)
             print("[ws] client disconnected")
 
     process_request = make_process_request(page_bytes)
@@ -167,7 +247,8 @@ async def main():
         print("=" * 60)
         print("Quest WebXR bridge")
         print("  serving  https://<this PC's LAN IP>:%d" % args.port)
-        print("  relaying to robot at %s:%d (expects an SSH -L tunnel)" % (args.robot_host, args.robot_port))
+        print("  relaying pose to robot at %s:%d (expects an SSH -L tunnel)" % (args.robot_host, args.robot_port))
+        print("  relaying camera from robot at %s:%d" % (args.robot_host, args.camera_port))
         print("=" * 60)
         await asyncio.Future()  # run forever
 
