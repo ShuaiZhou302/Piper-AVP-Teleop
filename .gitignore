@@ -17,3 +17,6 @@ model/
 
 # Local pulled HDF5 review caches
 data_collect/hpc3_*_review/
+
+# Regenerated at runtime from sys.executable -- machine-specific, not source
+quest/openvr_actions/app.vrmanifest
