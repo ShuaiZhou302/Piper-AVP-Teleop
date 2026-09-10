@@ -12,20 +12,24 @@ Mapping:
                         math as eef_avp_control_singlearm.py's head->arm)
     left controller  -> LEFT arm end-effector, trigger -> gripper
     right controller -> RIGHT arm end-effector, trigger -> gripper
-    left  X/Y (button_ax/button_by)  -> base forward / backward
-    right A/B (button_ax/button_by)  -> base turn right / turn left
+    left  X/Y (button_ax/button_by)  -> base turn left / turn right
+    right A/B (button_ax/button_by)  -> base backward / forward
     thumbstick click (either hand)   -> panic: all 3 arms ramp home, base stops
 
 Safety model (all enforced here, not on the Windows side -- the network
 sensor relay is not trusted):
-  - Clutch: all three arms only track while BOTH grips are held together.
-    The rising edge (both grips freshly pressed) latches the current head +
-    left + right poses as the delta-tracking origins for all three arms at
-    once, so none of them starts moving before the others. Releasing EITHER
-    grip freezes all three in place (holds last commanded joints) -- no
-    drift, no auto-return. Re-engaging always relocks to the hands'/head's
-    pose at that instant; small drift between engagements is expected, same
-    as the AVP script's per-episode anchoring.
+  - Clutch: pressing both grips together ONCE toggles all three arms
+    engaged, latching the current head + left + right poses as the
+    delta-tracking origins for all three at once, so none of them starts
+    moving before the others. This is a TOGGLE, not hold-to-track --
+    letting go of one/both grips after engaging does nothing by itself;
+    pressing both grips together again disengages (freezes all three in
+    place, holding last commanded joints, no drift, no auto-return).
+    Re-engaging always relocks to the hands'/head's pose at that instant;
+    small drift between engagements is expected, same as the AVP script's
+    per-episode anchoring. Staleness/panic always force a disengage
+    regardless of toggle state (see below) -- the toggle can only be
+    trusted to hold state while the link is fresh.
   - Base drive (X/Y/A/B) is independent of the arm clutch -- squeezing grip
     (thumb-independent finger) doesn't block pressing X/Y/A/B with the
     thumb, so driving the base while the arms track is possible on purpose.
@@ -207,11 +211,16 @@ class ArmChannel(object):
                 sol_arr = np.clip(sol_arr, prev - max_joint_step, prev + max_joint_step)
         self.target_q = sol_arr.tolist()
 
-        # Trigger: released (0) = open (gripper_max), squeezed (1) = closed (gripper_min).
-        # The mid/head channel always passes gripper_trigger=0.0 (head has no
-        # trigger), so its gripper just stays at gripper_max -- same as the
-        # fixed INITIAL_GRIPPER behavior in eef_avp_control_singlearm.py.
-        self.gripper = gripper_max - gripper_trigger * (gripper_max - gripper_min)
+        if gripper_trigger is None:
+            # mid/head channel: head has no trigger, so its gripper just stays
+            # fixed at INITIAL_GRIPPER -- same as eef_avp_control_singlearm.py.
+            self.gripper = INITIAL_GRIPPER
+        else:
+            # Trigger: released (0, resting) = closed (gripper_min), squeezed
+            # (1) = open (gripper_max). Matches the resting state of a hand
+            # loosely holding the controller -- fingers off the trigger should
+            # not leave the gripper open by default.
+            self.gripper = gripper_min + gripper_trigger * (gripper_max - gripper_min)
         return ""
 
     def home_step(self, max_step_rad):
@@ -340,9 +349,10 @@ class QuestTeleopServer(object):
             return
         for chan in self.channels:
             chan.boot_ramp_to_initial(self.args.boot_duration)
-        print("[teleop] ready. Hold BOTH grips together to engage all 3 arms "
-              "(head->mid, left->left, right->right); release either to freeze. "
-              "Left X/Y = base fwd/back, Right A/B = base turn right/left. "
+        print("[teleop] ready. Press BOTH grips together ONCE to engage all 3 arms "
+              "(head->mid, left->left, right->right); press together again to "
+              "disengage (toggle, not hold). "
+              "Left X/Y = base turn left/right, Right A/B = base back/fwd. "
               "Thumbstick click on either hand = panic ramp-home + base stop.")
 
         hz = self.args.rate
@@ -366,24 +376,34 @@ class QuestTeleopServer(object):
                 if btn and btn.get("stick_pressed"):
                     panic = True
 
-            # ---- combined tri-arm clutch: both grips together engage all 3 ----
+            # ---- combined tri-arm clutch: both grips together TOGGLES all 3 ----
+            # Press both grips together once to engage (lock all 3 origins),
+            # press together again to disengage. NOT hold-to-track -- letting
+            # go of one/both grips after engaging does nothing by itself.
+            # Staleness/panic always force disengage regardless of toggle state.
             both_grip = bool(
                 l_btn and l_btn.get("grip_pressed") and r_btn and r_btn.get("grip_pressed")
             )
             all_poses_ok = h_T is not None and l_T is not None and r_T is not None
             fresh = not (stale_freeze or stale_estop or panic)
 
-            if fresh and both_grip and not self.prev_both_grip and all_poses_ok:
-                self.mid.lock(h_T)
-                self.left.lock(l_T)
-                self.right.lock(r_T)
-                print("[teleop] ENGAGED (all 3 arms)")
-            elif not (fresh and both_grip):
-                if self.mid.engaged or self.left.engaged or self.right.engaged:
-                    print("[teleop] disengaged (frozen)")
+            if not fresh:
+                if self.mid.engaged:
+                    print("[teleop] disengaged (stale/panic)")
                 self.mid.freeze()
                 self.left.freeze()
                 self.right.freeze()
+            elif both_grip and not self.prev_both_grip and all_poses_ok:
+                if self.mid.engaged:
+                    self.mid.freeze()
+                    self.left.freeze()
+                    self.right.freeze()
+                    print("[teleop] disengaged (toggle off)")
+                else:
+                    self.mid.lock(h_T)
+                    self.left.lock(l_T)
+                    self.right.lock(r_T)
+                    print("[teleop] ENGAGED (all 3 arms, toggle on)")
             self.prev_both_grip = both_grip and fresh
 
             # ---- per-arm step ----
@@ -404,7 +424,7 @@ class QuestTeleopServer(object):
                     continue
 
                 if chan.engaged:
-                    trig = float(btn.get("trigger", 0.0)) if btn else 0.0
+                    trig = float(btn.get("trigger", 0.0)) if btn else None
                     msg = chan.track_step(
                         T_piper, self.args.scale, max_joint_step, trig,
                         self.args.gripper_min, self.args.gripper_max,
@@ -417,19 +437,20 @@ class QuestTeleopServer(object):
                     chan.publish()
 
             # ---- base drive: independent of arm clutch, gated by staleness/panic ----
+            # Left X/Y = turn left/right, right A/B = backward/forward.
             lin = 0.0
             ang = 0.0
             if not (stale_freeze or stale_estop or panic):
                 if l_btn:
-                    if l_btn.get("button_ax"):  # left X
-                        lin += self.args.base_linear_speed
-                    if l_btn.get("button_by"):  # left Y
-                        lin -= self.args.base_linear_speed
-                if r_btn:
-                    if r_btn.get("button_ax"):  # right A: turn right (clockwise)
-                        ang -= self.args.base_angular_speed
-                    if r_btn.get("button_by"):  # right B: turn left (counter-clockwise)
+                    if l_btn.get("button_ax"):  # left X: turn left (counter-clockwise)
                         ang += self.args.base_angular_speed
+                    if l_btn.get("button_by"):  # left Y: turn right (clockwise)
+                        ang -= self.args.base_angular_speed
+                if r_btn:
+                    if r_btn.get("button_ax"):  # right A: backward
+                        lin -= self.args.base_linear_speed
+                    if r_btn.get("button_by"):  # right B: forward
+                        lin += self.args.base_linear_speed
             self._publish_cmd_vel(lin, ang)
 
             now = time.monotonic()
@@ -479,10 +500,10 @@ def get_args():
     p.add_argument("--cmd_vel_topic", default="/cmd_vel",
                     help="Twist topic for interbotix_slate_driver's slate_base_node.")
     p.add_argument("--base_linear_speed", type=float, default=0.15,
-                    help="m/s while holding left X (forward) or Y (backward). Conservative "
+                    help="m/s while holding right B (forward) or A (backward). Conservative "
                          "default -- the driver's own software limit is 1.0 m/s.")
     p.add_argument("--base_angular_speed", type=float, default=0.3,
-                    help="rad/s while holding right A (turn right) or B (turn left).")
+                    help="rad/s while holding left X (turn left) or Y (turn right).")
 
     p.add_argument("--scale", type=float, default=1.0,
                     help="Position-only scale factor: hand/head delta * scale = EE delta.")

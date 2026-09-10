@@ -22,8 +22,9 @@ the Windows box driving the headset.
 Head drives the **mid** arm, left controller drives the **left** arm, right
 controller drives the **right** arm — same delta-pose-composition math as
 `eef_avp_control_singlearm.py`'s head→arm mapping, applied three times. Left
-X/Y and right A/B drive the mobile base (`interbotix_slate_driver`'s
-`/cmd_vel`). See [Controls](#5-controls) for the full mapping.
+X/Y turn the mobile base left/right and right A/B drive it backward/forward
+(`interbotix_slate_driver`'s `/cmd_vel`). See
+[Controls](#6-controls) for the full mapping.
 
 **All coordinate-frame math and ALL safety policy (clutch, staleness
 watchdog, e-stop ramp-home, base stop) live on the robot side**
@@ -106,18 +107,27 @@ ssh cobot_magic "echo ok"
 
 ## 4. Robot side setup (cobot_magic, in `aloha` conda env)
 
-Same startup sequence as the AVP flow ([`../Readme.md`](../Readme.md)) up
-through camera launch, then instead of the AVP/keyboard scripts:
+Uses the existing 3-arm launch tooling in
+[`../multi_arm_launch_tools/`](../multi_arm_launch_tools/Readme.md) --
+`start_ms_piper_3arm.launch mode:=1 auto_enable:=true` already gives all
+three arms `/master/joint_<arm>` command acceptance with no leader arm
+needed, which is exactly what `quest_server.py` expects (its
+`--{mid,left,right}_joint_topic` / `--..._cmd_topic` defaults match this
+launch file's topics as-is -- no ROS-side changes needed):
 
 ```bash
-# 1. CAN init (left / right / mid arms + base all share this step)
-cd /home/agilex/cobot_magic/Piper_ros_private-ros-noetic/
-bash can_config.sh
-source devel/setup.bash
+# 1. CAN init -- 4 modules this time (left/right/mid arms + base), NOT the
+#    2-arm can_config.sh from the AVP flow.
+cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/
+bash multi_arm_launch_tools/can_config_shuai.sh
+source /home/agilex/cobot_magic/Piper_ros_private-ros-noetic/devel/setup.bash
 
-# 2. Power-cycle the arms, then launch the driver for all three arms.
+# 2. Power-cycle the arms (confirm power strip on + all 3 arms' aviation
+#    connectors seated), then launch all 3 arms auto-enabled -- no physical
+#    leader arm needed, Quest2 replaces that role entirely.
 conda activate aloha
-roslaunch piper start_ms_piper.launch mode:=1 auto_enable:=true
+roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/start_ms_piper_3arm.launch mode:=1 auto_enable:=true
+# success = three lines of "使能状态: True", no SEND_MESSAGE_FAILED
 
 # 3. Base driver -- NOT part of any existing launch file (confirmed by
 #    grepping this repo's launch files: it's built but unused elsewhere).
@@ -126,12 +136,23 @@ roslaunch piper start_ms_piper.launch mode:=1 auto_enable:=true
 rosrun interbotix_slate_driver slate_base_node
 
 # 4. Cameras (optional for pose-only teleop)
-roslaunch astra_camera multi_camera.launch
+roslaunch /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/multi_arm_launch_tools/launch/multi_camera_shuai.launch
 
 # 5. Quest teleop server
 cd /home/agilex/cobot_magic/aloha-devel/Piper-AVP-Teleop/quest
 python quest_server.py
 ```
+
+Gripper torque is already hardware-limited independent of anything in this
+repo: every `/master/joint_<arm>` message's gripper value passes through
+`piper_start_ms_node.py`'s `joint_callback()`, which calls
+`piper_sdk`'s `GripperCtrl(angle, effort=1000, ...)` -- `effort` is a real
+firmware-level torque limit sent over CAN (0.001 N*m units, so 1000 = 1.0
+N*m), not something simulated in software. The motor will not keep
+tightening past that torque even while still being commanded further
+closed, which is the same mechanism (and the same hardcoded 1.0 N*m limit)
+the AVP teleop path already relies on -- nothing extra was needed here to
+get ALOHA-style "stops when it grasps something" gripper behavior.
 
 It binds `127.0.0.1:8770` only — reachable exclusively through the SSH
 tunnel above, never from the open network. It waits up to 10s for
@@ -164,23 +185,26 @@ live.
 
 | Input | Effect |
 | --- | --- |
-| Hold **both grips together** | Engage all 3 arms at once — locks head + left + right poses as the delta-tracking origins, all three start following from there |
-| Release **either** grip | Freeze all 3 arms at their last commanded pose (no drift, no auto-return) |
-| **Left/right trigger** (analog, while engaged) | That hand's arm gripper — released = open, fully squeezed = closed. Mid (head) arm's gripper stays fixed open (head has no trigger) |
-| **Left X** | Base forward |
-| **Left Y** | Base backward |
-| **Right A** | Base turn right (clockwise) |
-| **Right B** | Base turn left (counter-clockwise) |
-| **Thumbstick click** (either hand) | Panic: all 3 arms ramp home at `--return_speed_rad_s`, base stops, everything disengages |
+| Press **both grips together** (once) | **Toggle ON** — engage all 3 arms at once: locks head + left + right poses as the delta-tracking origins, all three start following from there. This is a toggle, not hold-to-track — letting go of the grips afterward does nothing |
+| Press **both grips together** again | **Toggle OFF** — freeze all 3 arms at their last commanded pose (no drift, no auto-return) |
+| **Left/right trigger** (analog, while engaged) | That hand's arm gripper — released (resting) = closed, fully squeezed = open. Mid (head) arm's gripper stays fixed open (head has no trigger) |
+| **Left X** | Base turn left (counter-clockwise) |
+| **Left Y** | Base turn right (clockwise) |
+| **Right A** | Base backward |
+| **Right B** | Base forward |
+| **Thumbstick click** (either hand) | Panic: all 3 arms ramp home at `--return_speed_rad_s`, base stops, everything force-disengaged (overrides the toggle) |
 
 Base drive is independent of the arm clutch — grip is squeezed with the
 middle/ring fingers, X/Y/A/B with the thumb, so driving the base while the
 arms track is possible (and allowed) on purpose.
 
-Re-engaging after a release does **not** re-anchor to a stale pose — the
-grip-together rising edge always relocks to the current head/hand poses *at
-that instant*, so small drift between engagements is expected and matches
-the AVP script's per-episode anchoring behavior.
+A staleness blip or panic always forces disengage regardless of the toggle's
+current state — the toggle only holds while the link is fresh (see
+[Safety watchdog details](#7-safety-watchdog-details)). Re-engaging does
+**not** re-anchor to a stale pose — the grip-together rising edge always
+relocks to the current head/hand poses *at that instant*, so small drift
+between engagements is expected and matches the AVP script's per-episode
+anchoring behavior.
 
 ## 7. Safety watchdog details
 
