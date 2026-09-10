@@ -1,35 +1,50 @@
 #!/usr/bin/env python3
 """
-Quest 2 dual-arm EEF teleop (robot side, runs on cobot_magic in `aloha`).
+Quest 2 tri-arm + base teleop (robot side, runs on cobot_magic in `aloha`).
 
-Receives raw HMD + left/right controller poses from quest_client.py (Windows)
-over a TCP socket (reached through an SSH -L tunnel -- this process only
-ever binds 127.0.0.1, it is not meant to be reachable except through that
-tunnel). Left controller drives the LEFT arm's end-effector, right
-controller drives the RIGHT arm's, exactly the way eef_avp_control_singlearm.py
-drives one arm from AVP head motion -- same delta-pose-composition math,
-same Pinocchio IK solver, same per-joint step clamp. Head pose is received
-and could later drive a camera gimbal, but nothing consumes it yet.
+Receives raw HMD + left/right controller poses from either quest_client.py
+(Windows, OpenVR) or webxr_server.py (Windows, WebXR bridge) over a TCP
+socket reached through an SSH -L tunnel -- this process only ever binds
+127.0.0.1, it is not meant to be reachable except through that tunnel.
+
+Mapping:
+    head            -> MID arm end-effector  (same delta-pose-composition
+                        math as eef_avp_control_singlearm.py's head->arm)
+    left controller  -> LEFT arm end-effector, trigger -> gripper
+    right controller -> RIGHT arm end-effector, trigger -> gripper
+    left  X/Y (button_ax/button_by)  -> base forward / backward
+    right A/B (button_ax/button_by)  -> base turn right / turn left
+    thumbstick click (either hand)   -> panic: all 3 arms ramp home, base stops
 
 Safety model (all enforced here, not on the Windows side -- the network
 sensor relay is not trusted):
-  - Clutch: an arm only moves while that controller's GRIP is held. Grip
-    press latches the current hand pose as the delta-tracking origin (like
-    head_pose_at_lock in the AVP script); grip release freezes the arm in
-    place (holds last commanded joints) -- no drift, no auto-return.
+  - Clutch: all three arms only track while BOTH grips are held together.
+    The rising edge (both grips freshly pressed) latches the current head +
+    left + right poses as the delta-tracking origins for all three arms at
+    once, so none of them starts moving before the others. Releasing EITHER
+    grip freezes all three in place (holds last commanded joints) -- no
+    drift, no auto-return. Re-engaging always relocks to the hands'/head's
+    pose at that instant; small drift between engagements is expected, same
+    as the AVP script's per-episode anchoring.
+  - Base drive (X/Y/A/B) is independent of the arm clutch -- squeezing grip
+    (thumb-independent finger) doesn't block pressing X/Y/A/B with the
+    thumb, so driving the base while the arms track is possible on purpose.
   - Staleness watchdog: if no fresh packet arrives within --stale_freeze_sec,
-    both arms are forced to the frozen (disengaged) state regardless of the
-    last button reading, because stale button state cannot be trusted.
+    all three arms are forced to the frozen (disengaged) state and the base
+    is stopped, regardless of the last button reading (stale button state
+    cannot be trusted).
   - E-stop ramp-home: if no fresh packet arrives within --stale_estop_sec
-    (network dead, client crashed, ...), both arms drive back to
-    INITIAL_ARM_JOINTS at a capped joint speed (--return_speed_rad_s), the
-    same speed-limited return used at episode end in the AVP script. Also
-    triggered manually by the A/X button on either controller (accessible
-    panic stop from inside the headset).
-  - Trigger (analog) maps to gripper opening: released = open, fully
-    squeezed = closed (intuitive "squeeze to grab").
+    (network dead, client crashed, ...), all three arms drive back to
+    INITIAL_ARM_JOINTS at a capped joint speed (--return_speed_rad_s) and
+    the base is stopped. Also triggered manually by a thumbstick click on
+    either controller (accessible panic stop from inside the headset).
+  - The base driver (interbotix_slate_driver) has its own independent
+    300 ms cmd_vel timeout baked in (CMD_TIME_OUT in slate_base.h) -- this
+    process's own staleness handling is a second, faster layer on top of
+    that, not a replacement for it.
 
-Run (on cobot_magic, after CAN init + `roslaunch piper start_ms_piper.launch ...`):
+Run (on cobot_magic, after CAN init + `roslaunch piper start_ms_piper.launch ...`
++ starting the base driver -- see ../Readme.md):
     conda activate aloha
     cd .../Piper-AVP-Teleop/quest
     python quest_server.py
@@ -58,6 +73,7 @@ from eef_keyboard_control_singlearm import PinocchioIKSolver  # noqa: E402  (loa
 import pinocchio as pin  # noqa: E402
 
 import rospy  # noqa: E402
+from geometry_msgs.msg import Twist  # noqa: E402
 from sensor_msgs.msg import JointState  # noqa: E402
 from std_msgs.msg import Header  # noqa: E402
 from tf.transformations import euler_matrix, euler_from_matrix  # noqa: E402
@@ -67,9 +83,9 @@ from protocol import FrameReader, DEFAULT_PORT, wire_to_pose  # noqa: E402
 
 # Quest / OpenVR standing world (right / up / back) -> Piper world
 # (forward / left / up). Numerically identical to R_AVP_TO_PIPER in
-# eef_avp_control_singlearm.py: OpenVR's standing universe uses the same
-# right-handed, +Y-up, +Z-back convention as the WebXR frame AVP reports
-# (see avp/Readme.md section 9; re-verified for SteamVR in quest/Readme.md).
+# eef_avp_control_singlearm.py: OpenVR's standing universe AND the WebXR
+# world frame (see webxr/index.html) use the same right-handed, +Y-up,
+# +Z-back convention as the AVP world frame (see avp/Readme.md section 9).
 R_QUEST_TO_PIPER = np.array([
     [0, 0, -1],
     [-1, 0, 0],
@@ -83,7 +99,7 @@ DEFAULT_URDF = (
 
 
 def remap_to_piper(T_quest):
-    """4x4 pose in OpenVR world -> 4x4 pose in Piper world (rotation-only remap)."""
+    """4x4 pose in OpenVR/WebXR world -> 4x4 pose in Piper world (rotation-only remap)."""
     T = np.eye(4)
     T[:3, 3] = R_QUEST_TO_PIPER @ T_quest[:3, 3]
     T[:3, :3] = R_QUEST_TO_PIPER @ T_quest[:3, :3] @ R_QUEST_TO_PIPER.T
@@ -91,9 +107,10 @@ def remap_to_piper(T_quest):
 
 
 class ArmChannel(object):
-    """One arm's IK/state/clutch logic. Mirrors AvpEefController but keyed
-    on a hand controller instead of the head, and non-blocking (single step()
-    call per main-loop tick instead of a dedicated blocking ramp loop)."""
+    """One arm's IK/state. Mirrors AvpEefController but driven by an
+    externally-supplied lock/engaged state (see QuestTeleopServer's combined
+    tri-arm clutch) and non-blocking (single step per main-loop tick instead
+    of a dedicated blocking ramp loop)."""
 
     def __init__(self, name, urdf_path, joint_topic, cmd_topic, pub_queue_size=10):
         self.name = name
@@ -103,8 +120,7 @@ class ArmChannel(object):
         rospy.Subscriber(joint_topic, JointState, self._joint_cb, queue_size=50)
 
         self.engaged = False
-        self.prev_grip = False
-        self.lock_hand_T = None       # (4,4) hand pose in Piper world at grip-press
+        self.lock_T = None            # (4,4) source pose (hand or head) in Piper world at engage
         self.target_q = None          # last commanded 6 joints
         self.gripper = INITIAL_GRIPPER
         self.initial_xyz = None
@@ -155,26 +171,20 @@ class ArmChannel(object):
         self.initial_R = euler_matrix(*fk_rpy)[:3, :3]
         print("[%s] boot ramp done. FK anchor xyz=%s" % (self.name, fk_xyz.round(4)))
 
-    def on_grip_edge(self, grip_pressed, hand_T_piper):
-        """Call every tick with the current grip state; handles rising/falling edges."""
-        if grip_pressed and not self.prev_grip:
-            self.lock_hand_T = hand_T_piper.copy()
-            self.engaged = True
-            print("[%s] ENGAGED" % self.name)
-        elif not grip_pressed and self.prev_grip:
-            self.engaged = False
-            print("[%s] disengaged (frozen)" % self.name)
-        self.prev_grip = grip_pressed
+    def lock(self, T_piper):
+        """Latch T_piper as this arm's delta-tracking origin and start tracking."""
+        self.lock_T = T_piper.copy()
+        self.engaged = True
 
-    def force_disengage(self):
+    def freeze(self):
+        """Stop tracking; target_q (last commanded pose) is left untouched."""
         self.engaged = False
-        self.prev_grip = False
 
-    def track_step(self, hand_T_piper, scale, max_joint_step, gripper_trigger,
+    def track_step(self, T_piper, scale, max_joint_step, gripper_trigger,
                     gripper_min, gripper_max, respect_collision):
         """One IK-tracking tick while engaged. Returns an ik status string ('' = ok)."""
-        delta_pos = hand_T_piper[:3, 3] - self.lock_hand_T[:3, 3]
-        delta_R = hand_T_piper[:3, :3] @ self.lock_hand_T[:3, :3].T
+        delta_pos = T_piper[:3, 3] - self.lock_T[:3, 3]
+        delta_R = T_piper[:3, :3] @ self.lock_T[:3, :3].T
         target_pos = self.initial_xyz + delta_pos * scale
         target_R = delta_R @ self.initial_R
         target_rpy = np.array(euler_from_matrix(target_R), dtype=float)
@@ -198,6 +208,9 @@ class ArmChannel(object):
         self.target_q = sol_arr.tolist()
 
         # Trigger: released (0) = open (gripper_max), squeezed (1) = closed (gripper_min).
+        # The mid/head channel always passes gripper_trigger=0.0 (head has no
+        # trigger), so its gripper just stays at gripper_max -- same as the
+        # fixed INITIAL_GRIPPER behavior in eef_avp_control_singlearm.py.
         self.gripper = gripper_max - gripper_trigger * (gripper_max - gripper_min)
         return ""
 
@@ -223,10 +236,13 @@ class QuestTeleopServer(object):
         self.args = args
         rospy.init_node("quest_teleop", anonymous=True)
 
-        self.left = ArmChannel("left", args.left_urdf, args.left_joint_topic,
-                                args.left_cmd_topic)
-        self.right = ArmChannel("right", args.right_urdf, args.right_joint_topic,
-                                 args.right_cmd_topic)
+        self.mid = ArmChannel("mid", args.mid_urdf, args.mid_joint_topic, args.mid_cmd_topic)
+        self.left = ArmChannel("left", args.left_urdf, args.left_joint_topic, args.left_cmd_topic)
+        self.right = ArmChannel("right", args.right_urdf, args.right_joint_topic, args.right_cmd_topic)
+        self.channels = (self.mid, self.left, self.right)
+
+        self.cmd_vel_pub = rospy.Publisher(args.cmd_vel_topic, Twist, queue_size=1)
+        self.prev_both_grip = False
 
         self._lock = threading.Lock()
         self._latest = None
@@ -276,7 +292,7 @@ class QuestTeleopServer(object):
         deadline = rospy.Time.now() + rospy.Duration(timeout_sec)
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
-            if self.left.has_feedback() and self.right.has_feedback():
+            if all(c.has_feedback() for c in self.channels):
                 return True
             if rospy.Time.now() > deadline:
                 return False
@@ -284,21 +300,32 @@ class QuestTeleopServer(object):
         return False
 
     # ---------- main loop ----------
-    def _hand_from_frame(self, frame, side):
+    def _device_from_frame(self, frame, key):
+        """Returns (T_piper or None, buttons dict or None) for 'head'/'left'/'right'."""
         if frame is None:
             return None, None
-        d = frame.get(side)
+        d = frame.get(key)
         if not d or not d.get("connected") or not d.get("valid"):
             return None, None
         T_piper = remap_to_piper(wire_to_pose(d))
         return T_piper, d.get("buttons")
 
+    def _publish_cmd_vel(self, linear_x, angular_z):
+        msg = Twist()
+        msg.linear.x = linear_x
+        msg.angular.z = angular_z
+        self.cmd_vel_pub.publish(msg)
+
     def run(self):
         print("=" * 60)
-        print("Quest dual-arm EEF teleop")
+        print("Quest tri-arm + base teleop")
         print("  listen              = %s:%d" % (self.args.host, self.args.port))
+        print("  mid   joint/cmd     = %s / %s" % (self.args.mid_joint_topic, self.args.mid_cmd_topic))
         print("  left  joint/cmd     = %s / %s" % (self.args.left_joint_topic, self.args.left_cmd_topic))
         print("  right joint/cmd     = %s / %s" % (self.args.right_joint_topic, self.args.right_cmd_topic))
+        print("  cmd_vel_topic       = %s" % self.args.cmd_vel_topic)
+        print("  base speed lin/ang  = %.2f m/s / %.2f rad/s" %
+              (self.args.base_linear_speed, self.args.base_angular_speed))
         print("  stale_freeze_sec    = %.2f" % self.args.stale_freeze_sec)
         print("  stale_estop_sec     = %.2f" % self.args.stale_estop_sec)
         print("  return_speed_rad_s  = %.2f" % self.args.return_speed_rad_s)
@@ -311,10 +338,12 @@ class QuestTeleopServer(object):
         if not self.wait_feedback(10.0):
             print("[boot] timed out waiting for joint feedback. Is the piper driver running?")
             return
-        self.left.boot_ramp_to_initial(self.args.boot_duration)
-        self.right.boot_ramp_to_initial(self.args.boot_duration)
-        print("[teleop] ready. Hold GRIP on a controller to engage that arm; "
-              "TRIGGER controls gripper; A/X on either controller = panic ramp-home.")
+        for chan in self.channels:
+            chan.boot_ramp_to_initial(self.args.boot_duration)
+        print("[teleop] ready. Hold BOTH grips together to engage all 3 arms "
+              "(head->mid, left->left, right->right); release either to freeze. "
+              "Left X/Y = base fwd/back, Right A/B = base turn right/left. "
+              "Thumbstick click on either hand = panic ramp-home + base stop.")
 
         hz = self.args.rate
         rate = rospy.Rate(hz)
@@ -328,31 +357,51 @@ class QuestTeleopServer(object):
             stale_freeze = recv_age > self.args.stale_freeze_sec
             stale_estop = recv_age > self.args.stale_estop_sec
 
-            l_T, l_btn = (None, None) if stale_freeze else self._hand_from_frame(frame, "left")
-            r_T, r_btn = (None, None) if stale_freeze else self._hand_from_frame(frame, "right")
+            h_T, _ = (None, None) if stale_freeze else self._device_from_frame(frame, "head")
+            l_T, l_btn = (None, None) if stale_freeze else self._device_from_frame(frame, "left")
+            r_T, r_btn = (None, None) if stale_freeze else self._device_from_frame(frame, "right")
 
             panic = False
             for btn in (l_btn, r_btn):
-                if btn and btn.get("button_ax"):
+                if btn and btn.get("stick_pressed"):
                     panic = True
 
+            # ---- combined tri-arm clutch: both grips together engage all 3 ----
+            both_grip = bool(
+                l_btn and l_btn.get("grip_pressed") and r_btn and r_btn.get("grip_pressed")
+            )
+            all_poses_ok = h_T is not None and l_T is not None and r_T is not None
+            fresh = not (stale_freeze or stale_estop or panic)
+
+            if fresh and both_grip and not self.prev_both_grip and all_poses_ok:
+                self.mid.lock(h_T)
+                self.left.lock(l_T)
+                self.right.lock(r_T)
+                print("[teleop] ENGAGED (all 3 arms)")
+            elif not (fresh and both_grip):
+                if self.mid.engaged or self.left.engaged or self.right.engaged:
+                    print("[teleop] disengaged (frozen)")
+                self.mid.freeze()
+                self.left.freeze()
+                self.right.freeze()
+            self.prev_both_grip = both_grip and fresh
+
+            # ---- per-arm step ----
             ik_msgs = []
-            for chan, T_piper, btn in ((self.left, l_T, l_btn), (self.right, r_T, r_btn)):
+            for chan, T_piper, btn in (
+                (self.mid, h_T, None), (self.left, l_T, l_btn), (self.right, r_T, r_btn),
+            ):
                 if stale_estop or panic:
-                    chan.force_disengage()
+                    chan.freeze()
                     if chan.target_q is not None:
                         chan.home_step(home_step_rad)
                     chan.publish()
                     continue
 
                 if stale_freeze or T_piper is None:
-                    chan.force_disengage()
                     if chan.target_q is not None:
                         chan.publish()  # hold last commanded pose
                     continue
-
-                grip_pressed = bool(btn and btn.get("grip_pressed"))
-                chan.on_grip_edge(grip_pressed, T_piper)
 
                 if chan.engaged:
                     trig = float(btn.get("trigger", 0.0)) if btn else 0.0
@@ -367,21 +416,40 @@ class QuestTeleopServer(object):
                 if chan.target_q is not None:
                     chan.publish()
 
+            # ---- base drive: independent of arm clutch, gated by staleness/panic ----
+            lin = 0.0
+            ang = 0.0
+            if not (stale_freeze or stale_estop or panic):
+                if l_btn:
+                    if l_btn.get("button_ax"):  # left X
+                        lin += self.args.base_linear_speed
+                    if l_btn.get("button_by"):  # left Y
+                        lin -= self.args.base_linear_speed
+                if r_btn:
+                    if r_btn.get("button_ax"):  # right A: turn right (clockwise)
+                        ang -= self.args.base_angular_speed
+                    if r_btn.get("button_by"):  # right B: turn left (counter-clockwise)
+                        ang += self.args.base_angular_speed
+            self._publish_cmd_vel(lin, ang)
+
             now = time.monotonic()
             if now - last_print > 1.0:
                 status = "STALE(%.1fs)" % recv_age if stale_freeze else "live"
-                print("[teleop] %-16s L=%s%s R=%s%s%s" % (
-                    status,
-                    "ENGAGED" if self.left.engaged else ("HOME" if self.left.returning_home else "idle"),
-                    "*" if panic else "",
-                    "ENGAGED" if self.right.engaged else ("HOME" if self.right.returning_home else "idle"),
-                    "*" if panic else "",
+
+                def arm_status(c):
+                    return "ENGAGED" if c.engaged else ("HOME" if c.returning_home else "idle")
+
+                print("[teleop] %-16s M=%-7s L=%-7s R=%-7s base(lin=%+.2f ang=%+.2f)%s%s" % (
+                    status, arm_status(self.mid), arm_status(self.left), arm_status(self.right),
+                    lin, ang,
+                    " PANIC" if panic else "",
                     ("  " + "; ".join(ik_msgs)) if ik_msgs else "",
                 ))
                 last_print = now
 
             rate.sleep()
 
+        self._publish_cmd_vel(0.0, 0.0)
         self._stop = True
         if self._server_sock is not None:
             try:
@@ -391,31 +459,42 @@ class QuestTeleopServer(object):
 
 
 def get_args():
-    p = argparse.ArgumentParser(description="Quest 2 -> Piper dual-arm EEF teleop (robot side)")
+    p = argparse.ArgumentParser(description="Quest 2 -> Piper tri-arm + base teleop (robot side)")
     p.add_argument("--host", default="127.0.0.1",
                     help="Bind address. Keep this 127.0.0.1 -- reachability is meant to "
                          "come ONLY from the SSH -L tunnel, not the open network.")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--rate", type=float, default=50.0, help="Control loop rate (Hz).")
 
+    p.add_argument("--mid_urdf", default=DEFAULT_URDF)
     p.add_argument("--left_urdf", default=DEFAULT_URDF)
     p.add_argument("--right_urdf", default=DEFAULT_URDF)
+    p.add_argument("--mid_joint_topic", default="/puppet/joint_mid")
+    p.add_argument("--mid_cmd_topic", default="/master/joint_mid")
     p.add_argument("--left_joint_topic", default="/puppet/joint_left")
     p.add_argument("--left_cmd_topic", default="/master/joint_left")
     p.add_argument("--right_joint_topic", default="/puppet/joint_right")
     p.add_argument("--right_cmd_topic", default="/master/joint_right")
 
+    p.add_argument("--cmd_vel_topic", default="/cmd_vel",
+                    help="Twist topic for interbotix_slate_driver's slate_base_node.")
+    p.add_argument("--base_linear_speed", type=float, default=0.15,
+                    help="m/s while holding left X (forward) or Y (backward). Conservative "
+                         "default -- the driver's own software limit is 1.0 m/s.")
+    p.add_argument("--base_angular_speed", type=float, default=0.3,
+                    help="rad/s while holding right A (turn right) or B (turn left).")
+
     p.add_argument("--scale", type=float, default=1.0,
-                    help="Position-only scale factor: hand delta * scale = EE delta.")
+                    help="Position-only scale factor: hand/head delta * scale = EE delta.")
     p.add_argument("--boot_duration", type=float, default=3.0)
     p.add_argument("--return_speed_rad_s", type=float, default=0.3,
                     help="Max joint speed while auto-returning home (e-stop / panic).")
     p.add_argument("--max_joint_step", type=float, default=0.05,
                     help="Max per-joint change per control tick (rad) during normal tracking.")
     p.add_argument("--stale_freeze_sec", type=float, default=0.2,
-                    help="No fresh packet for longer than this -> freeze both arms in place.")
+                    help="No fresh packet for longer than this -> freeze all arms + stop base.")
     p.add_argument("--stale_estop_sec", type=float, default=1.0,
-                    help="No fresh packet for longer than this -> ramp both arms home.")
+                    help="No fresh packet for longer than this -> ramp all arms home.")
     p.add_argument("--gripper_min", type=float, default=0.0)
     p.add_argument("--gripper_max", type=float, default=0.1)
     p.add_argument("--respect_collision", action="store_true")

@@ -44,6 +44,16 @@
                     "path": "/user/hand/right/input/b",
                     "mode": "button",
                     "inputs": { "click": { "output": "/actions/quest_teleop/in/ButtonSecondary" } }
+                },
+                {
+                    "path": "/user/hand/left/input/joystick",
+                    "mode": "button",
+                    "inputs": { "click": { "output": "/actions/quest_teleop/in/StickClick" } }
+                },
+                {
+                    "path": "/user/hand/right/input/joystick",
+                    "mode": "button",
+                    "inputs": { "click": { "output": "/actions/quest_teleop/in/StickClick" } }
                 }
             ]
         }

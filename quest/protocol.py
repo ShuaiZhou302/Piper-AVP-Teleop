@@ -119,6 +119,10 @@ def device_to_wire(dev, with_buttons):
             "trigger_pressed": bool(b["trigger_pressed"]),
             "button_ax": bool(b["button_ax"]),
             "button_by": bool(b["button_by"]),
+            # Thumbstick click. Physically separate from button_ax/button_by
+            # (X/Y/A/B) on purpose -- quest_server.py uses button_ax/button_by
+            # for base drive and needs an unrelated input for panic/e-stop.
+            "stick_pressed": bool(b.get("stick_pressed", False)),
         }
     return out
 

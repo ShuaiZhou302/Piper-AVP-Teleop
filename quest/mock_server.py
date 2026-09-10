@@ -46,10 +46,12 @@ def describe(name, d):
     s = "%-6s piper_xyz(%+.3f %+.3f %+.3f)" % (name, x, y, z)
     b = d.get("buttons")
     if b:
-        s += " trig=%.2f grip=%.2f%s%s" % (
+        s += " trig=%.2f grip=%.2f%s%s%s%s" % (
             b["trigger"], b["grip"],
             " GRIP" if b["grip_pressed"] else "",
-            " A/X" if b["button_ax"] else "",
+            " AX" if b["button_ax"] else "",
+            " BY" if b["button_by"] else "",
+            " STICK" if b.get("stick_pressed") else "",
         )
     return s
 

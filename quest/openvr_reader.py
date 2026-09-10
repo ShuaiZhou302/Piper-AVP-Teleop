@@ -120,6 +120,7 @@ class QuestPoseReader(object):
         self._act_grip = self.vrinput.getActionHandle("/actions/quest_teleop/in/Grip")
         self._act_primary = self.vrinput.getActionHandle("/actions/quest_teleop/in/ButtonPrimary")
         self._act_secondary = self.vrinput.getActionHandle("/actions/quest_teleop/in/ButtonSecondary")
+        self._act_stick = self.vrinput.getActionHandle("/actions/quest_teleop/in/StickClick")
         self._src_left = self.vrinput.getInputSourceHandle("/user/hand/left")
         self._src_right = self.vrinput.getInputSourceHandle("/user/hand/right")
 
@@ -140,6 +141,7 @@ class QuestPoseReader(object):
         grip = self.vrinput.getAnalogActionData(self._act_grip, hand_src)
         primary = self.vrinput.getDigitalActionData(self._act_primary, hand_src)
         secondary = self.vrinput.getDigitalActionData(self._act_secondary, hand_src)
+        stick = self.vrinput.getDigitalActionData(self._act_stick, hand_src)
         if not (trig.bActive or grip.bActive):
             return None
         return {
@@ -149,6 +151,7 @@ class QuestPoseReader(object):
             "trigger_pressed": bool(trig.x > TRIGGER_THRESHOLD),
             "button_ax": bool(primary.bActive and primary.bState),
             "button_by": bool(secondary.bActive and secondary.bState),
+            "stick_pressed": bool(stick.bActive and stick.bState),
         }
 
     def _pack(self, poses, idx, hand_src):
