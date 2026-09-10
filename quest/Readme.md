@@ -187,7 +187,7 @@ live.
 | --- | --- |
 | Press **both grips together** (once) | **Toggle ON** — engage all 3 arms at once: locks head + left + right poses as the delta-tracking origins, all three start following from there. This is a toggle, not hold-to-track — letting go of the grips afterward does nothing |
 | Press **both grips together** again | **Toggle OFF** — freeze all 3 arms at their last commanded pose (no drift, no auto-return) |
-| **Left/right trigger** (analog, while engaged) | That hand's arm gripper — released (resting) = closed, fully squeezed = open. Mid (head) arm's gripper stays fixed open (head has no trigger) |
+| **Left/right trigger** (analog, while engaged) | That hand's arm gripper — released (resting) = open, fully squeezed = closed (squeeze to grab). Mid (head) arm's gripper stays fixed open (head has no trigger) |
 | **Left X** | Base turn left (counter-clockwise) |
 | **Left Y** | Base turn right (clockwise) |
 | **Right A** | Base backward |

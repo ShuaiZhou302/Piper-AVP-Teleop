@@ -219,9 +219,9 @@ function updateReplica(t, head, left, right, headM, leftM, rightM) {
 }
 
 function gripperOpenM(trigger) {
-  // Released (0, resting) = closed, squeezed (1) = open -- matches
+  // Released (0, resting) = open, squeezed (1) = closed -- matches
   // quest_server.py's ArmChannel.track_step().
-  return GRIPPER_MIN + trigger * (GRIPPER_MAX - GRIPPER_MIN);
+  return GRIPPER_MAX - trigger * (GRIPPER_MAX - GRIPPER_MIN);
 }
 
 // ---- WebGL: shaders, geometry -----------------------------------------------

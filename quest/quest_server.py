@@ -216,11 +216,10 @@ class ArmChannel(object):
             # fixed at INITIAL_GRIPPER -- same as eef_avp_control_singlearm.py.
             self.gripper = INITIAL_GRIPPER
         else:
-            # Trigger: released (0, resting) = closed (gripper_min), squeezed
-            # (1) = open (gripper_max). Matches the resting state of a hand
-            # loosely holding the controller -- fingers off the trigger should
-            # not leave the gripper open by default.
-            self.gripper = gripper_min + gripper_trigger * (gripper_max - gripper_min)
+            # Trigger: released (0, resting) = open (gripper_max), squeezed
+            # (1) = closed (gripper_min) -- squeeze to grab, same as closing
+            # a real hand around something.
+            self.gripper = gripper_max - gripper_trigger * (gripper_max - gripper_min)
         return ""
 
     def home_step(self, max_step_rad):
