@@ -175,6 +175,22 @@ class ArmChannel(object):
         self.initial_R = euler_matrix(*fk_rpy)[:3, :3]
         print("[%s] boot ramp done. FK anchor xyz=%s" % (self.name, fk_xyz.round(4)))
 
+    def anchor_at_current_pose(self):
+        """No motion: anchor this arm's delta-tracking origin at whatever
+        joint state it's already in, instead of ramping to
+        INITIAL_ARM_JOINTS. Only the mid/head channel has a fixed standby
+        pose (it needs one -- head motion has no natural "current position"
+        to anchor from); left/right start teleop from wherever they already
+        are, no boot motion."""
+        current_q = np.asarray(self.joint.position[:6], dtype=float)
+        self.target_q = current_q.tolist()
+        self.gripper = INITIAL_GRIPPER
+        fk_xyz, fk_rpy = self.fk(current_q)
+        self.initial_xyz = fk_xyz
+        self.initial_R = euler_matrix(*fk_rpy)[:3, :3]
+        print("[%s] anchored at current pose (no boot ramp). FK anchor xyz=%s" %
+              (self.name, fk_xyz.round(4)))
+
     def lock(self, T_piper):
         """Latch T_piper as this arm's delta-tracking origin and start tracking."""
         self.lock_T = T_piper.copy()
@@ -346,8 +362,12 @@ class QuestTeleopServer(object):
         if not self.wait_feedback(10.0):
             print("[boot] timed out waiting for joint feedback. Is the piper driver running?")
             return
-        for chan in self.channels:
-            chan.boot_ramp_to_initial(self.args.boot_duration)
+        # Only mid has a fixed standby pose to ramp to (it needs one -- head
+        # motion has no natural "current position" to anchor from). Left/right
+        # anchor at whatever pose they're already in, no boot motion.
+        self.mid.boot_ramp_to_initial(self.args.boot_duration)
+        self.left.anchor_at_current_pose()
+        self.right.anchor_at_current_pose()
         print("[teleop] ready. Press BOTH grips together ONCE to engage all 3 arms "
               "(head->mid, left->left, right->right); press together again to "
               "disengage (toggle, not hold). "

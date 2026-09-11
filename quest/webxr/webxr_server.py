@@ -78,9 +78,14 @@ class RobotBridge:
         self.port = port
         self.reconnect_delay = reconnect_delay
         self.writer = None
+        self._task = None
 
     def start(self):
-        asyncio.ensure_future(self._run())
+        # asyncio only holds a WEAK reference to a bare ensure_future() task --
+        # with nothing else referencing it, it can be garbage-collected mid-run
+        # (observed live: "Task was destroyed but it is pending!"). Keep a
+        # strong reference on self for the process lifetime.
+        self._task = asyncio.ensure_future(self._run())
 
     async def _run(self):
         while True:
@@ -144,9 +149,11 @@ class CameraBridge:
         self.port = port
         self.clients = clients  # set of currently-open websocket connections
         self.reconnect_delay = reconnect_delay
+        self._task = None
 
     def start(self):
-        asyncio.ensure_future(self._run())
+        # See RobotBridge.start()'s comment -- same GC pitfall, same fix.
+        self._task = asyncio.ensure_future(self._run())
 
     async def _run(self):
         while True:
