@@ -192,7 +192,25 @@ class ArmChannel(object):
               (self.name, fk_xyz.round(4)))
 
     def lock(self, T_piper):
-        """Latch T_piper as this arm's delta-tracking origin and start tracking."""
+        """Latch T_piper as this arm's delta-tracking origin and start tracking.
+
+        Also re-anchors the FK reference (initial_xyz/initial_R) from the
+        CURRENT physical joint feedback. Without this, initial_xyz stayed
+        fixed at whatever it was set to at boot; after any panic/stale-estop
+        ramp-home (home_step drives target_q to INITIAL_ARM_JOINTS for all
+        three arms but never touched initial_xyz), left/right's anchor went
+        stale relative to the arm's real pose. The next lock() would then
+        have track_step compute a target far from the current joints --
+        clipped per-tick by max_joint_step, but visible as the arm briskly
+        "running" to the wrong place right after re-engaging. Recomputing
+        the anchor here every time matches the documented behavior
+        ("re-engaging always relocks... same as the AVP script's
+        per-episode anchoring") which previously only applied to lock_T.
+        """
+        current_q = np.asarray(self.joint.position[:6], dtype=float)
+        fk_xyz, fk_rpy = self.fk(current_q)
+        self.initial_xyz = fk_xyz
+        self.initial_R = euler_matrix(*fk_rpy)[:3, :3]
         self.lock_T = T_piper.copy()
         self.engaged = True
 
