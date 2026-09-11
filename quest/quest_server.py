@@ -82,7 +82,7 @@ from sensor_msgs.msg import JointState  # noqa: E402
 from std_msgs.msg import Header  # noqa: E402
 from tf.transformations import euler_matrix, euler_from_matrix  # noqa: E402
 
-from protocol import FrameReader, DEFAULT_PORT, wire_to_pose  # noqa: E402
+from protocol import FrameReader, DEFAULT_PORT, wire_to_pose, encode  # noqa: E402
 
 
 # Quest / OpenVR standing world (right / up / back) -> Piper world
@@ -271,6 +271,7 @@ class QuestTeleopServer(object):
         self._lock = threading.Lock()
         self._latest = None
         self._last_recv_mono = None
+        self._current_conn = None  # same socket, written back to for status (see _send_status)
         self._server_sock = None
         self._stop = False
 
@@ -289,6 +290,8 @@ class QuestTeleopServer(object):
                 break
             print("[net] client connected: %s" % (addr,))
             conn.settimeout(2.0)
+            with self._lock:
+                self._current_conn = conn
             reader = FrameReader(conn)
             try:
                 while not self._stop:
@@ -304,12 +307,31 @@ class QuestTeleopServer(object):
             except (OSError, ValueError) as e:
                 print("[net] recv error: %s" % e)
             finally:
+                with self._lock:
+                    if self._current_conn is conn:
+                        self._current_conn = None
                 conn.close()
                 print("[net] client disconnected; waiting for reconnect")
 
     def _snapshot(self):
         with self._lock:
             return self._latest, self._last_recv_mono
+
+    def _send_status(self, payload):
+        """Best-effort write back on the SAME connection the browser is
+        sending pose on -- webxr_server.py's RobotBridge relays whatever
+        comes back here to the browser over WebSocket (see index.html's
+        ik_status handling). Read (background thread) and write (this,
+        called from the main control loop) happen on the same socket from
+        different threads; that's fine, they're independent directions."""
+        with self._lock:
+            conn = self._current_conn
+        if conn is None:
+            return
+        try:
+            conn.sendall(encode(payload))
+        except OSError:
+            pass
 
     # ---------- boot ----------
     def wait_feedback(self, timeout_sec):
@@ -426,7 +448,14 @@ class QuestTeleopServer(object):
             self.prev_both_grip = both_grip and fresh
 
             # ---- per-arm step ----
+            # ik_status is sent back to the browser every tick (see
+            # _send_status) so a stuck-in-place arm shows up as an explicit
+            # "IK fail: ..." in the VR HUD instead of silently not following
+            # -- IK failure (workspace/reach limit, etc.) intentionally does
+            # NOT update target_q, so the arm just stops where it is with no
+            # local signal to the operator that anything went wrong.
             ik_msgs = []
+            ik_status = {"type": "ik_status", "mid": "", "left": "", "right": ""}
             for chan, T_piper, btn in (
                 (self.mid, h_T, None), (self.left, l_T, l_btn), (self.right, r_T, r_btn),
             ):
@@ -451,9 +480,12 @@ class QuestTeleopServer(object):
                     )
                     if msg:
                         ik_msgs.append("%s: %s" % (chan.name, msg))
+                        ik_status[chan.name] = msg
 
                 if chan.target_q is not None:
                     chan.publish()
+
+            self._send_status(ik_status)
 
             # ---- base drive: independent of arm clutch, gated by staleness/panic ----
             # Left X/Y = turn left/right, right A/B = backward/forward.
@@ -527,8 +559,9 @@ def get_args():
     p.add_argument("--scale", type=float, default=1.0,
                     help="Position-only scale factor: hand/head delta * scale = EE delta.")
     p.add_argument("--boot_duration", type=float, default=3.0)
-    p.add_argument("--return_speed_rad_s", type=float, default=0.3,
-                    help="Max joint speed while auto-returning home (e-stop / panic).")
+    p.add_argument("--return_speed_rad_s", type=float, default=0.15,
+                    help="Max joint speed while auto-returning home (e-stop / panic). "
+                         "Slowed from an earlier 0.3 default after it felt too fast live.")
     p.add_argument("--max_joint_step", type=float, default=0.05,
                     help="Max per-joint change per control tick (rad) during normal tracking.")
     p.add_argument("--stale_freeze_sec", type=float, default=0.2,

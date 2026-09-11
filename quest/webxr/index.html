@@ -64,18 +64,22 @@ function connectWs() {
   ws.onopen = () => { wsOpen = true; setStatusLine("ws", "OPEN", true); };
   ws.onclose = () => { wsOpen = false; setStatusLine("ws", "CLOSED (retrying)", false); setTimeout(connectWs, 1000); };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
-  // Incoming messages are camera frames relayed by webxr_server.py's
-  // CameraBridge (see camera_streamer.py); this connection never receives
-  // anything else. updateCamTexture/CAM_NAMES are defined later in this
+  // Incoming messages are either camera frames (CameraBridge) or status
+  // frames quest_server.py writes back on the pose connection itself, e.g.
+  // per-arm IK failure (RobotBridge) -- see webxr_server.py. Referenced
+  // names (updateCamTexture, CAM_NAMES, ikStatus) are defined later in this
   // file but that's fine -- this callback only runs once real messages
   // arrive, well after the whole script has finished evaluating.
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
-    if (msg.type !== "camera") return;
-    const got = CAM_NAMES.filter((n) => msg[n]);
-    for (const name of got) updateCamTexture(name, msg[name]);
-    if (got.length) setStatusLine("cam", got.join(",") + " @ " + new Date().toLocaleTimeString(), true);
+    if (msg.type === "camera") {
+      const got = CAM_NAMES.filter((n) => msg[n]);
+      for (const name of got) updateCamTexture(name, msg[name]);
+      if (got.length) setStatusLine("cam", got.join(",") + " @ " + new Date().toLocaleTimeString(), true);
+    } else if (msg.type === "ik_status") {
+      ikStatus = msg;
+    }
   };
 }
 connectWs();
@@ -160,6 +164,12 @@ const replica = {
   baseMovedM: 0.0,
   lastT: null,
 };
+
+// Per-arm IK failure text from quest_server.py (see ws.onmessage's
+// "ik_status" handling). IK failure intentionally leaves the arm exactly
+// where it is with no local signal otherwise -- this is what makes "my
+// hand kept moving but the arm stopped" visible instead of silent.
+let ikStatus = { mid: "", left: "", right: "" };
 
 // Numerically identical to R_QUEST_TO_PIPER in quest_server.py: Quest world
 // (right/up/back) -> Piper world (forward/left/up). Applying this to the
@@ -389,6 +399,7 @@ function renderHudText(engaged, panic, head, left, right, headM, leftM, rightM) 
   } else {
     bigLine("head  (not engaged)", "#888", 30);
   }
+  if (ikStatus.mid) bigLine(`  ! IK FAIL (mid stuck): ${ikStatus.mid}`, "#f66", 26);
 
   if (engaged && replica.lockLeft && left.connected) {
     const l = deltaPosDeg(leftM, replica.lockLeft);
@@ -398,6 +409,7 @@ function renderHudText(engaged, panic, head, left, right, headM, leftM, rightM) 
   } else {
     bigLine("left  (not engaged)", "#888", 30);
   }
+  if (ikStatus.left) bigLine(`  ! IK FAIL (left stuck): ${ikStatus.left}`, "#f66", 26);
 
   if (engaged && replica.lockRight && right.connected) {
     const r = deltaPosDeg(rightM, replica.lockRight);
@@ -407,6 +419,7 @@ function renderHudText(engaged, panic, head, left, right, headM, leftM, rightM) 
   } else {
     bigLine("right (not engaged)", "#888", 30);
   }
+  if (ikStatus.right) bigLine(`  ! IK FAIL (right stuck): ${ikStatus.right}`, "#f66", 26);
 
   bigLine(`base  turned ${replica.baseTurnedDeg>=0?"+":""}${replica.baseTurnedDeg.toFixed(0)}deg   moved ${replica.baseMovedM>=0?"+":""}${replica.baseMovedM.toFixed(2)}m`, "#dd8", 34);
   bigLine("L: X=turn-left Y=turn-right   R: A=back B=fwd   stick=panic", "#888", 24);

@@ -10,7 +10,9 @@ quest_server.py itself needs ZERO changes for this transport switch.
 Also relays the OTHER direction: camera_streamer.py's JPEG frames (a
 SEPARATE TCP connection/port from the pose stream on purpose, see
 protocol.py) get broadcast to every connected browser WebSocket as-is, for
-in-headset visual feedback while teleoperating (see CameraBridge).
+in-headset visual feedback while teleoperating (see CameraBridge). Status
+frames (e.g. per-arm IK failure) that quest_server.py writes back on the
+pose connection itself are relayed the same way (see RobotBridge).
 
 Why this exists instead of reusing avp/tele_vision.py's Vuer wrapper: the
 pinned vuer==0.0.31rc7's Python schema has a `Gamepads` scene component, but
@@ -71,11 +73,20 @@ class RobotBridge:
     Uses asyncio streams (not a blocking socket) so a slow/failing connect
     attempt never stalls the HTTPS/WSS server's event loop -- start() only
     schedules the background reconnect loop, it does not await a connection.
+
+    Also reads status frames quest_server.py writes back on this SAME
+    connection (e.g. per-arm IK failure -- see quest_server.py's
+    _send_status()) and relays them to every connected browser WebSocket,
+    same as CameraBridge does for camera frames. The connection is
+    browser-initiated (this class connects out to quest_server.py) but not
+    one-way at the byte level; only the pose stream direction is fire-and-
+    forget.
     """
 
-    def __init__(self, host, port, reconnect_delay=1.0):
+    def __init__(self, host, port, clients, reconnect_delay=1.0):
         self.host = host
         self.port = port
+        self.clients = clients  # set of currently-open websocket connections
         self.reconnect_delay = reconnect_delay
         self.writer = None
         self._task = None
@@ -98,9 +109,18 @@ class RobotBridge:
             self.writer = writer
             print("[bridge] connected to %s:%d" % (self.host, self.port))
             try:
-                await reader.read()  # blocks until the peer closes; quest_server.py never sends anything back
-            except OSError:
-                pass
+                while True:
+                    frame = await _read_frame(reader)
+                    if frame is None:
+                        break
+                    msg = json.dumps(frame)
+                    for ws in list(self.clients):
+                        try:
+                            await ws.send(msg)
+                        except Exception:
+                            self.clients.discard(ws)
+            except (OSError, ValueError) as e:
+                print("[bridge] recv error: %s" % e)
             self.writer = None
             print("[bridge] disconnected from %s:%d; reconnecting" % (self.host, self.port))
             await asyncio.sleep(self.reconnect_delay)
@@ -217,10 +237,11 @@ async def main():
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(CERT, KEY)
 
-    bridge = RobotBridge(args.robot_host, args.robot_port)
+    clients = set()
+
+    bridge = RobotBridge(args.robot_host, args.robot_port, clients)
     bridge.start()
 
-    clients = set()
     camera_bridge = CameraBridge(args.robot_host, args.camera_port, clients)
     camera_bridge.start()
 
