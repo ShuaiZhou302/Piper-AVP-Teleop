@@ -213,9 +213,15 @@ class ArmChannel(object):
         self.initial_R = euler_matrix(*fk_rpy)[:3, :3]
         self.lock_T = T_piper.copy()
         self.engaged = True
+        # Re-engaging cancels any pending ramp-home from a previous disengage
+        # (see run()'s toggle-off handling) so tracking resumes immediately
+        # instead of waiting for the arm to finish walking home first.
+        self.returning_home = False
 
     def freeze(self):
-        """Stop tracking; target_q (last commanded pose) is left untouched."""
+        """Stop tracking; target_q (last commanded pose) is left untouched.
+        Caller decides separately whether to also ramp home (see
+        returning_home / home_step)."""
         self.engaged = False
 
     def track_step(self, T_piper, scale, max_joint_step, gripper_trigger,
@@ -299,14 +305,21 @@ class QuestTeleopServer(object):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((self.args.host, self.args.port))
         s.listen(1)
+        s.settimeout(2.0)  # diagnostic: bare periodic heartbeat, see [net-hb] below
         self._server_sock = s
-        print("[net] listening on %s:%d" % (self.args.host, self.args.port))
+        print("[net] listening on %s:%d" % (self.args.host, self.args.port), flush=True)
+        heartbeats = 0
         while not self._stop:
             try:
                 conn, addr = s.accept()
+            except socket.timeout:
+                heartbeats += 1
+                if heartbeats % 3 == 0:
+                    print("[net-hb] accept_loop alive, still waiting (t=%ds)" % (heartbeats * 2), flush=True)
+                continue
             except OSError:
                 break
-            print("[net] client connected: %s" % (addr,))
+            print("[net] client connected: %s" % (addr,), flush=True)
             conn.settimeout(2.0)
             with self._lock:
                 self._current_conn = conn
@@ -457,13 +470,37 @@ class QuestTeleopServer(object):
                     self.mid.freeze()
                     self.left.freeze()
                     self.right.freeze()
-                    print("[teleop] disengaged (toggle off)")
+                    # Normal (non-panic) disengage now ramps home too, same
+                    # speed/mechanism as the stale/panic path below -- set by
+                    # user request after testing showed the arm just sitting
+                    # wherever the hand last was felt wrong for ending a
+                    # session. lock() clears this again if re-engaged mid-ramp.
+                    self.mid.returning_home = True
+                    self.left.returning_home = True
+                    self.right.returning_home = True
+                    print("[teleop] disengaged (toggle off) -- ramping home")
                 else:
                     self.mid.lock(h_T)
                     self.left.lock(l_T)
                     self.right.lock(r_T)
                     print("[teleop] ENGAGED (all 3 arms, toggle on)")
-            self.prev_both_grip = both_grip and fresh
+
+            # Edge-tracking for next tick's both-grip rising-edge detection.
+            # Only update it from a REAL button reading (l_btn/r_btn are None
+            # only during stale_freeze, i.e. we truly have no idea what the
+            # physical grip state is). Previously this was `both_grip and
+            # fresh`, which forced prev_both_grip to False on every not-fresh
+            # tick (staleness OR a panic click) regardless of the actual
+            # button state -- if the user was still physically holding both
+            # grips through a brief stale/panic blip, the first fresh frame
+            # after recovery looked like a brand-new rising edge and silently
+            # flipped engage<->disengage from what the user actually pressed
+            # (observed live: a short stall mid-session inverted the toggle).
+            # Leaving prev_both_grip untouched while we have no button data
+            # means the next real reading is compared against the last
+            # trusted one, not a forced False.
+            if l_btn is not None and r_btn is not None:
+                self.prev_both_grip = both_grip
 
             # ---- per-arm step ----
             # ik_status is sent back to the browser every tick (see
@@ -477,7 +514,13 @@ class QuestTeleopServer(object):
             for chan, T_piper, btn in (
                 (self.mid, h_T, None), (self.left, l_T, l_btn), (self.right, r_T, r_btn),
             ):
-                if stale_estop or panic:
+                # stale_estop/panic force a ramp-home same as a normal
+                # toggle-off disengage now does (chan.returning_home, set in
+                # the toggle handling above) -- unify all three triggers
+                # through the same home_step machinery/speed so a
+                # deliberate disengage and a network drop both bring the
+                # arm home the same slow way instead of just holding still.
+                if stale_estop or panic or chan.returning_home:
                     chan.freeze()
                     if chan.target_q is not None:
                         chan.home_step(home_step_rad)
